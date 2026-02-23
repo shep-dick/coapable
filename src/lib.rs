@@ -1,17 +1,20 @@
-use crate::endpoint::TransportError;
+use crate::transport::TransportError;
 
-mod context;
-mod endpoint;
-mod exchange;
-mod session;
+mod transport;
 
-pub use context::CoapContext;
-pub use endpoint::CoapEndpoint;
+pub use transport::CoapContext;
+pub use transport::CoapEndpoint;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error(transparent)]
     Socket(#[from] TransportError),
+
+    #[error("request timed out after {retransmits} retransmissions")]
+    Timeout { retransmits: u32 },
+
+    #[error("peer sent RST")]
+    Reset,
 }
 
 #[cfg(test)]

@@ -1,24 +1,10 @@
 use std::net::SocketAddr;
 
+use super::{Result, TransportError};
 use bytes::Bytes;
-use thiserror::Error;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-
-type Result<T> = std::result::Result<T, TransportError>;
-
-#[derive(Debug, Error)]
-pub enum TransportError {
-    #[error("io error")]
-    Io(#[from] std::io::Error),
-
-    #[error("packet sending error")]
-    Send(#[from] mpsc::error::SendError<(bytes::Bytes, std::net::SocketAddr)>),
-
-    #[error("endpoint closed")]
-    Closed,
-}
 
 pub struct CoapEndpoint {
     outbound_sender: mpsc::Sender<(Bytes, SocketAddr)>,

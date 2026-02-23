@@ -7,4 +7,5 @@ edition = "2024"
 bytes = "1.11.1"
 coap-lite = "0.13.3"
 thiserror = "2.0.18"
-tokio = { version = "1.49.0", features = ["full"] }
+rand = "0.9"
+tokio = { version = "1.49.0", features = ["full", "test-util"] }
