@@ -2,6 +2,8 @@ use crate::endpoint::TransportError;
 
 mod endpoint;
 
+pub use endpoint::CoapEndpoint;
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error(transparent)]
