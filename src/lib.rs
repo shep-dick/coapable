@@ -2,10 +2,12 @@ use crate::client::ClientError;
 use crate::server::ServerError;
 use crate::transport::TransportError;
 
-mod client;
+pub mod client;
 mod server;
 mod transport;
 
+pub use client::{CoapClient, CoapResponse, RequestBuilder};
+pub use transport::ClientInterface;
 pub use transport::CoapEndpoint;
 pub use transport::CoapStack;
 

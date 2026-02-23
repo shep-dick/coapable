@@ -208,6 +208,10 @@ impl CoapStack {
                                     .entry(peer)
                                     .or_insert_with(|| PeerSession::new(peer));
 
+                                if packet.get_token().is_empty() {
+                                    let token = session.allocate_token();
+                                    packet.set_token(token);
+                                }
                                 let token = packet.get_token().to_vec();
                                 let mid = session.allocate_mid();
                                 packet.header.message_id = mid;

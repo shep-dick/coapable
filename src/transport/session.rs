@@ -5,7 +5,7 @@ use coap_lite::{MessageClass, Packet};
 use tokio::time::Instant;
 
 use super::exchange::Exchange;
-use super::reliability::{DedupEntry, EXCHANGE_LIFETIME, MessageIdAllocator};
+use super::reliability::{DedupEntry, EXCHANGE_LIFETIME, MessageIdAllocator, TokenAllocator};
 
 pub struct PeerSession {
     peer: SocketAddr,
@@ -14,6 +14,8 @@ pub struct PeerSession {
     mid_to_token: HashMap<u16, Vec<u8>>,
     /// Per-peer MID allocator for outbound messages.
     mid_allocator: MessageIdAllocator,
+    /// Per-peer token allocator for outbound requests.
+    token_allocator: TokenAllocator,
     /// Dedup table for inbound messages, keyed by MID.
     inbound_dedup: HashMap<u16, DedupEntry>,
 }
@@ -34,6 +36,7 @@ impl PeerSession {
             exchanges: HashMap::new(),
             mid_to_token: HashMap::new(),
             mid_allocator: MessageIdAllocator::new(),
+            token_allocator: TokenAllocator::new(),
             inbound_dedup: HashMap::new(),
         }
     }
@@ -52,6 +55,11 @@ impl PeerSession {
     /// Allocate the next MID for an outbound message.
     pub fn allocate_mid(&mut self) -> u16 {
         self.mid_allocator.allocate()
+    }
+
+    /// Allocate the next token for an outbound request.
+    pub fn allocate_token(&mut self) -> Vec<u8> {
+        self.token_allocator.allocate()
     }
 
     /// Register an exchange for a NON request (token-based lookup only).

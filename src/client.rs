@@ -1,21 +1,429 @@
 use std::net::SocketAddr;
 
-use coap_lite::CoapRequest;
+use coap_lite::{
+    CoapOption, ContentFormat, MessageClass, MessageType, Packet, RequestType, ResponseType,
+};
 
 use crate::transport::ClientInterface;
 
 #[derive(Debug, thiserror::Error)]
-pub enum ClientError {}
+pub enum ClientError {
+    #[error(transparent)]
+    Transport(#[from] crate::transport::TransportError),
 
+    #[error("response channel closed unexpectedly")]
+    ChannelClosed,
+}
+
+type Result<T> = std::result::Result<T, ClientError>;
+
+/// A CoAP client for building and sending requests.
+///
+/// Cheaply cloneable — can be shared across tasks.
+#[derive(Clone)]
 pub struct CoapClient {
     interface: ClientInterface,
 }
 
 impl CoapClient {
-    pub async fn send_request(&self, req: CoapRequest<SocketAddr>, peer: SocketAddr) {
-        self.interface
-            .send_request(req.message, peer)
+    pub fn new(interface: ClientInterface) -> Self {
+        Self { interface }
+    }
+
+    pub fn get(&self, peer: SocketAddr) -> RequestBuilder {
+        RequestBuilder::new(self.interface.clone(), peer, RequestType::Get)
+    }
+
+    pub fn post(&self, peer: SocketAddr) -> RequestBuilder {
+        RequestBuilder::new(self.interface.clone(), peer, RequestType::Post)
+    }
+
+    pub fn put(&self, peer: SocketAddr) -> RequestBuilder {
+        RequestBuilder::new(self.interface.clone(), peer, RequestType::Put)
+    }
+
+    pub fn delete(&self, peer: SocketAddr) -> RequestBuilder {
+        RequestBuilder::new(self.interface.clone(), peer, RequestType::Delete)
+    }
+}
+
+/// Builds a CoAP request with a fluent API.
+///
+/// Requests are Confirmable (reliable) by default.
+pub struct RequestBuilder {
+    interface: ClientInterface,
+    peer: SocketAddr,
+    method: RequestType,
+    path: Option<String>,
+    queries: Vec<String>,
+    payload: Option<Vec<u8>>,
+    content_format: Option<ContentFormat>,
+    accept: Option<ContentFormat>,
+    confirmable: bool,
+    token: Option<Vec<u8>>,
+}
+
+impl RequestBuilder {
+    fn new(interface: ClientInterface, peer: SocketAddr, method: RequestType) -> Self {
+        Self {
+            interface,
+            peer,
+            method,
+            path: None,
+            queries: Vec::new(),
+            payload: None,
+            content_format: None,
+            accept: None,
+            confirmable: true,
+            token: None,
+        }
+    }
+
+    /// Sets the URI path (e.g. "/sensors/temperature").
+    pub fn path(mut self, path: &str) -> Self {
+        self.path = Some(path.to_string());
+        self
+    }
+
+    /// Adds a query parameter encoded as "key=value" in Uri-Query.
+    pub fn query(mut self, key: &str, value: &str) -> Self {
+        self.queries.push(format!("{key}={value}"));
+        self
+    }
+
+    /// Sets the request payload.
+    pub fn payload(mut self, data: impl Into<Vec<u8>>) -> Self {
+        self.payload = Some(data.into());
+        self
+    }
+
+    /// Sets the Content-Format option.
+    pub fn content_format(mut self, cf: ContentFormat) -> Self {
+        self.content_format = Some(cf);
+        self
+    }
+
+    /// Sets the Accept option.
+    pub fn accept(mut self, cf: ContentFormat) -> Self {
+        self.accept = Some(cf);
+        self
+    }
+
+    /// Sets whether the request is Confirmable (default: true).
+    ///
+    /// Confirmable requests are retransmitted until acknowledged.
+    /// Non-confirmable requests are fire-and-forget at the transport layer.
+    pub fn confirmable(mut self, confirm: bool) -> Self {
+        self.confirmable = confirm;
+        self
+    }
+
+    /// Overrides the auto-generated token with a custom one.
+    pub fn token(mut self, token: Vec<u8>) -> Self {
+        self.token = Some(token);
+        self
+    }
+
+    /// Builds the packet, sends the request, and awaits the response.
+    pub async fn send(self) -> Result<CoapResponse> {
+        let mut packet = Packet::new();
+
+        packet.header.code = MessageClass::Request(self.method);
+        packet.header.set_type(if self.confirmable {
+            MessageType::Confirmable
+        } else {
+            MessageType::NonConfirmable
+        });
+
+        // Token: if user provided one, set it; otherwise leave empty
+        // and the transport layer will allocate one per-peer.
+        if let Some(token) = self.token {
+            packet.set_token(token);
+        }
+
+        if let Some(ref path) = self.path {
+            for segment in path.split('/').filter(|s| !s.is_empty()) {
+                packet.add_option(CoapOption::UriPath, segment.as_bytes().to_vec());
+            }
+        }
+
+        for q in &self.queries {
+            packet.add_option(CoapOption::UriQuery, q.as_bytes().to_vec());
+        }
+
+        if let Some(cf) = self.content_format {
+            packet.set_content_format(cf);
+        }
+
+        if let Some(cf) = self.accept {
+            let value = usize::from(cf) as u16;
+            packet.add_option_as(
+                CoapOption::Accept,
+                coap_lite::option_value::OptionValueU16(value),
+            );
+        }
+
+        if let Some(payload) = self.payload {
+            packet.payload = payload;
+        }
+
+        let response_rx = self.interface.send_request(packet, self.peer).await?;
+        let packet = response_rx
+            .await
+            .map_err(|_| ClientError::ChannelClosed)??;
+
+        Ok(CoapResponse { packet })
+    }
+}
+
+/// A CoAP response received from a peer.
+pub struct CoapResponse {
+    packet: Packet,
+}
+
+impl CoapResponse {
+    /// Returns the response status code.
+    pub fn status(&self) -> ResponseType {
+        match self.packet.header.code {
+            MessageClass::Response(code) => code,
+            _ => unreachable!("non-response packet in CoapResponse"),
+        }
+    }
+
+    /// Returns the response payload as bytes.
+    pub fn payload(&self) -> &[u8] {
+        &self.packet.payload
+    }
+
+    /// Returns the payload as a UTF-8 string, if valid.
+    pub fn payload_string(&self) -> Option<&str> {
+        std::str::from_utf8(&self.packet.payload).ok()
+    }
+
+    /// Returns the Content-Format of the response, if present.
+    pub fn content_format(&self) -> Option<ContentFormat> {
+        self.packet.get_content_format()
+    }
+
+    /// Consumes the response and returns the underlying packet.
+    pub fn into_packet(self) -> Packet {
+        self.packet
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transport::{CoapEndpoint, CoapStack};
+    use coap_lite::ResponseType;
+    use tokio::net::UdpSocket;
+
+    #[tokio::test]
+    async fn clone_client() {
+        let sock_a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = CoapEndpoint::start(sock_a).await.unwrap();
+        let (client_if, _server, _stack) = CoapStack::start(endpoint).await.unwrap();
+        let client = CoapClient::new(client_if);
+        let client2 = client.clone();
+        let client3 = client.clone();
+    }
+
+    #[tokio::test]
+    async fn get_with_non_response() {
+        let sock_a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr_a = sock_a.local_addr().unwrap();
+        let sock_b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr_b = sock_b.local_addr().unwrap();
+
+        let endpoint = CoapEndpoint::start(sock_a).await.unwrap();
+        let (client_if, _server, stack) = CoapStack::start(endpoint).await.unwrap();
+        let client = CoapClient::new(client_if);
+
+        // Spawn the request in a task so we can simultaneously play the server role
+        let handle = tokio::spawn(async move {
+            client
+                .get(addr_b)
+                .path("/temperature")
+                .confirmable(false)
+                .send()
+                .await
+        });
+
+        // Peer B receives the request
+        let mut buf = [0u8; 2048];
+        let (n, _) = sock_b.recv_from(&mut buf).await.unwrap();
+        let received = Packet::from_bytes(&buf[..n]).unwrap();
+
+        // Verify path option
+        let uri_path = received.get_option(CoapOption::UriPath).unwrap();
+        let segments: Vec<&[u8]> = uri_path.iter().map(|v| v.as_slice()).collect();
+        assert_eq!(segments, vec![b"temperature"]);
+
+        // Peer B sends a NON response with matching token
+        let mut response = Packet::new();
+        response.header.set_type(MessageType::NonConfirmable);
+        response.header.code = MessageClass::Response(ResponseType::Content);
+        response.set_token(received.get_token().to_vec());
+        response.payload = b"22.5".to_vec();
+        sock_b
+            .send_to(&response.to_bytes().unwrap(), addr_a)
             .await
             .unwrap();
+
+        let resp = handle.await.unwrap().unwrap();
+        assert_eq!(resp.status(), ResponseType::Content);
+        assert_eq!(resp.payload(), b"22.5");
+        assert_eq!(resp.payload_string(), Some("22.5"));
+
+        drop(_server);
+        stack.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn post_with_payload_and_content_format() {
+        let sock_a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr_a = sock_a.local_addr().unwrap();
+        let sock_b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr_b = sock_b.local_addr().unwrap();
+
+        let endpoint = CoapEndpoint::start(sock_a).await.unwrap();
+        let (client_if, _server, stack) = CoapStack::start(endpoint).await.unwrap();
+        let client = CoapClient::new(client_if);
+
+        let handle = tokio::spawn(async move {
+            client
+                .post(addr_b)
+                .path("/data")
+                .content_format(ContentFormat::ApplicationJSON)
+                .payload(b"{\"value\":42}".to_vec())
+                .confirmable(false)
+                .send()
+                .await
+        });
+
+        let mut buf = [0u8; 2048];
+        let (n, _) = sock_b.recv_from(&mut buf).await.unwrap();
+        let received = Packet::from_bytes(&buf[..n]).unwrap();
+
+        assert!(matches!(
+            received.header.code,
+            MessageClass::Request(RequestType::Post)
+        ));
+        assert_eq!(received.payload, b"{\"value\":42}");
+        assert_eq!(
+            received.get_content_format(),
+            Some(ContentFormat::ApplicationJSON)
+        );
+
+        // Send Created response
+        let mut response = Packet::new();
+        response.header.set_type(MessageType::NonConfirmable);
+        response.header.code = MessageClass::Response(ResponseType::Created);
+        response.set_token(received.get_token().to_vec());
+        sock_b
+            .send_to(&response.to_bytes().unwrap(), addr_a)
+            .await
+            .unwrap();
+
+        let resp = handle.await.unwrap().unwrap();
+        assert_eq!(resp.status(), ResponseType::Created);
+
+        drop(_server);
+        stack.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn get_with_query_params() {
+        let sock_a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr_a = sock_a.local_addr().unwrap();
+        let sock_b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr_b = sock_b.local_addr().unwrap();
+
+        let endpoint = CoapEndpoint::start(sock_a).await.unwrap();
+        let (client_if, _server, stack) = CoapStack::start(endpoint).await.unwrap();
+        let client = CoapClient::new(client_if);
+
+        let handle = tokio::spawn(async move {
+            client
+                .get(addr_b)
+                .path("/search")
+                .query("type", "sensor")
+                .query("limit", "10")
+                .confirmable(false)
+                .send()
+                .await
+        });
+
+        let mut buf = [0u8; 2048];
+        let (n, _) = sock_b.recv_from(&mut buf).await.unwrap();
+        let received = Packet::from_bytes(&buf[..n]).unwrap();
+
+        let queries = received.get_option(CoapOption::UriQuery).unwrap();
+        let query_strs: Vec<String> = queries
+            .iter()
+            .map(|v| String::from_utf8(v.clone()).unwrap())
+            .collect();
+        assert_eq!(query_strs, vec!["type=sensor", "limit=10"]);
+
+        let mut response = Packet::new();
+        response.header.set_type(MessageType::NonConfirmable);
+        response.header.code = MessageClass::Response(ResponseType::Content);
+        response.set_token(received.get_token().to_vec());
+        response.payload = b"results".to_vec();
+        sock_b
+            .send_to(&response.to_bytes().unwrap(), addr_a)
+            .await
+            .unwrap();
+
+        let resp = handle.await.unwrap().unwrap();
+        assert_eq!(resp.status(), ResponseType::Content);
+        assert_eq!(resp.payload(), b"results");
+
+        drop(_server);
+        stack.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn con_get_with_piggybacked_response() {
+        let sock_a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr_a = sock_a.local_addr().unwrap();
+        let sock_b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr_b = sock_b.local_addr().unwrap();
+
+        let endpoint = CoapEndpoint::start(sock_a).await.unwrap();
+        let (client_if, _server, stack) = CoapStack::start(endpoint).await.unwrap();
+        let client = CoapClient::new(client_if);
+
+        let handle = tokio::spawn(async move {
+            client
+                .get(addr_b)
+                .path("/reliable")
+                .send() // confirmable by default
+                .await
+        });
+
+        let mut buf = [0u8; 2048];
+        let (n, _) = sock_b.recv_from(&mut buf).await.unwrap();
+        let received = Packet::from_bytes(&buf[..n]).unwrap();
+        assert_eq!(received.header.get_type(), MessageType::Confirmable);
+
+        // Piggybacked response: ACK with response code + same MID
+        let mut response = Packet::new();
+        response.header.set_type(MessageType::Acknowledgement);
+        response.header.code = MessageClass::Response(ResponseType::Content);
+        response.header.message_id = received.header.message_id;
+        response.set_token(received.get_token().to_vec());
+        response.payload = b"reliable data".to_vec();
+        sock_b
+            .send_to(&response.to_bytes().unwrap(), addr_a)
+            .await
+            .unwrap();
+
+        let resp = handle.await.unwrap().unwrap();
+        assert_eq!(resp.status(), ResponseType::Content);
+        assert_eq!(resp.payload(), b"reliable data");
+
+        drop(_server);
+        stack.shutdown().await.unwrap();
     }
 }

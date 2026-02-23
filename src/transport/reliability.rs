@@ -41,6 +41,26 @@ impl MessageIdAllocator {
     }
 }
 
+/// Per-peer token allocator. Wrapping u32 counter with random start.
+/// Produces 4-byte tokens, matching RFC 7252's recommended token size.
+pub struct TokenAllocator {
+    next: u32,
+}
+
+impl TokenAllocator {
+    pub fn new() -> Self {
+        Self {
+            next: rand::rng().random(),
+        }
+    }
+
+    pub fn allocate(&mut self) -> Vec<u8> {
+        let token = self.next.to_be_bytes().to_vec();
+        self.next = self.next.wrapping_add(1);
+        token
+    }
+}
+
 /// Retransmission state for a single CON exchange.
 pub struct RetransmitState {
     /// Serialized packet bytes, ready to re-send.
@@ -132,6 +152,17 @@ mod tests {
 
         // Next advance should fail — MAX_RETRANSMIT exceeded
         assert!(!state.advance(now));
+    }
+
+    #[test]
+    fn token_allocator_wraps() {
+        let mut alloc = TokenAllocator {
+            next: u32::MAX - 1,
+        };
+        assert_eq!(alloc.allocate(), (u32::MAX - 1).to_be_bytes().to_vec());
+        assert_eq!(alloc.allocate(), u32::MAX.to_be_bytes().to_vec());
+        assert_eq!(alloc.allocate(), 0u32.to_be_bytes().to_vec());
+        assert_eq!(alloc.allocate(), 1u32.to_be_bytes().to_vec());
     }
 
     #[test]
