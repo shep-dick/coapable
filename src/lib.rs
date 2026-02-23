@@ -1,7 +1,11 @@
 use crate::endpoint::TransportError;
 
+mod context;
 mod endpoint;
+mod exchange;
+mod session;
 
+pub use context::CoapContext;
 pub use endpoint::CoapEndpoint;
 
 #[derive(Debug, thiserror::Error)]
