@@ -27,15 +27,64 @@ enum Outbound {
     Response { packet: Packet, peer: SocketAddr },
 }
 
-pub struct CoapStack {
+#[derive(Clone)]
+pub struct ClientInterface {
+    outbound_sender: mpsc::Sender<Outbound>,
+}
+
+impl ClientInterface {
+    /// Send a CoAP request to a peer. Returns a receiver for the response.
+    pub async fn send_request(
+        &self,
+        packet: Packet,
+        peer: SocketAddr,
+    ) -> Result<oneshot::Receiver<std::result::Result<Packet, TransportError>>> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.outbound_sender
+            .send(Outbound::Request {
+                packet,
+                peer,
+                response_tx,
+            })
+            .await
+            .map_err(|_| TransportError::EndpointClosed)?;
+        Ok(response_rx)
+    }
+}
+
+pub struct ServerInterface {
     outbound_sender: mpsc::Sender<Outbound>,
     server_request_receiver: mpsc::Receiver<ServerRequest>,
+}
+
+impl ServerInterface {
+    /// Send a CoAP response to a peer (server-side).
+    pub async fn send_response(&self, packet: Packet, peer: SocketAddr) -> Result<()> {
+        self.outbound_sender
+            .send(Outbound::Response { packet, peer })
+            .await
+            .map_err(|_| TransportError::EndpointClosed)?;
+        Ok(())
+    }
+
+    /// Receive the next inbound CoAP request (server-side).
+    pub async fn recv_request(&mut self) -> Result<ServerRequest> {
+        self.server_request_receiver
+            .recv()
+            .await
+            .ok_or(TransportError::EndpointClosed)
+    }
+}
+
+pub struct CoapStack {
     task: JoinHandle<Result<()>>,
 }
 
 impl CoapStack {
     /// Spawns context task and returns a lightweight handle for message passing.
-    pub async fn start(mut endpoint: CoapEndpoint) -> Result<CoapStack> {
+    pub async fn start(
+        mut endpoint: CoapEndpoint,
+    ) -> Result<(ClientInterface, ServerInterface, Self)> {
         let (outbound_sender, mut outbound_receiver) = mpsc::channel::<Outbound>(100);
         let (server_request_sender, server_request_receiver) = mpsc::channel::<ServerRequest>(100);
 
@@ -225,51 +274,19 @@ impl CoapStack {
             }
         });
 
-        Ok(CoapStack {
-            outbound_sender,
-            server_request_receiver,
-            task,
-        })
-    }
-
-    /// Send a CoAP request to a peer. Returns a receiver for the response.
-    pub async fn send_request(
-        &self,
-        packet: Packet,
-        peer: SocketAddr,
-    ) -> Result<oneshot::Receiver<std::result::Result<Packet, TransportError>>> {
-        let (response_tx, response_rx) = oneshot::channel();
-        self.outbound_sender
-            .send(Outbound::Request {
-                packet,
-                peer,
-                response_tx,
-            })
-            .await
-            .map_err(|_| TransportError::EndpointClosed)?;
-        Ok(response_rx)
-    }
-
-    /// Send a CoAP response to a peer (server-side).
-    pub async fn send_response(&self, packet: Packet, peer: SocketAddr) -> Result<()> {
-        self.outbound_sender
-            .send(Outbound::Response { packet, peer })
-            .await
-            .map_err(|_| TransportError::EndpointClosed)?;
-        Ok(())
-    }
-
-    /// Receive the next inbound CoAP request (server-side).
-    pub async fn recv_request(&mut self) -> Result<ServerRequest> {
-        self.server_request_receiver
-            .recv()
-            .await
-            .ok_or(TransportError::EndpointClosed)
+        Ok((
+            ClientInterface {
+                outbound_sender: outbound_sender.clone(),
+            },
+            ServerInterface {
+                outbound_sender,
+                server_request_receiver,
+            },
+            CoapStack { task },
+        ))
     }
 
     pub async fn shutdown(self) -> Result<()> {
-        drop(self.outbound_sender);
-        drop(self.server_request_receiver);
         self.task
             .await
             .map_err(|_| TransportError::EndpointClosed)?
@@ -290,7 +307,7 @@ mod tests {
         let addr_b = sock_b.local_addr().unwrap();
 
         let endpoint = CoapEndpoint::start(sock_a).await.unwrap();
-        let mut stack = CoapStack::start(endpoint).await.unwrap();
+        let (_client, mut server, stack) = CoapStack::start(endpoint).await.unwrap();
 
         // Peer B sends a NON GET request to context A
         let mut request = Packet::new();
@@ -302,7 +319,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (req, peer) = stack.recv_request().await.unwrap();
+        let (req, peer) = server.recv_request().await.unwrap();
         assert_eq!(peer, addr_b);
         assert!(matches!(
             req.header.code,
@@ -310,6 +327,8 @@ mod tests {
         ));
         assert_eq!(req.get_token(), &[1, 2, 3, 4]);
 
+        drop(_client);
+        drop(server);
         stack.shutdown().await.unwrap();
     }
 
@@ -321,14 +340,14 @@ mod tests {
         let addr_b = sock_b.local_addr().unwrap();
 
         let endpoint = CoapEndpoint::start(sock_a).await.unwrap();
-        let stack = CoapStack::start(endpoint).await.unwrap();
+        let (client, _server, stack) = CoapStack::start(endpoint).await.unwrap();
 
         // Client sends a NON request to peer B
         let mut request = Packet::new();
         request.header.code = MessageClass::Request(RequestType::Get);
         request.header.set_type(MessageType::NonConfirmable);
         request.set_token(vec![5, 6, 7, 8]);
-        let response_rx = stack.send_request(request, addr_b).await.unwrap();
+        let response_rx = client.send_request(request, addr_b).await.unwrap();
 
         // Peer B receives the request
         let mut buf = [0u8; 2048];
@@ -355,6 +374,8 @@ mod tests {
         ));
         assert_eq!(resp.payload, b"hello");
 
+        drop(client);
+        drop(_server);
         stack.shutdown().await.unwrap();
     }
 
@@ -366,14 +387,14 @@ mod tests {
         let addr_b = sock_b.local_addr().unwrap();
 
         let endpoint = CoapEndpoint::start(sock_a).await.unwrap();
-        let stack = CoapStack::start(endpoint).await.unwrap();
+        let (client, _server, stack) = CoapStack::start(endpoint).await.unwrap();
 
         // Client sends a CON request
         let mut request = Packet::new();
         request.header.code = MessageClass::Request(RequestType::Get);
         request.header.set_type(MessageType::Confirmable);
         request.set_token(vec![10, 11]);
-        let response_rx = stack.send_request(request, addr_b).await.unwrap();
+        let response_rx = client.send_request(request, addr_b).await.unwrap();
 
         // Peer B receives the CON request
         let mut buf = [0u8; 2048];
@@ -401,6 +422,8 @@ mod tests {
         ));
         assert_eq!(resp.payload, b"piggyback");
 
+        drop(client);
+        drop(_server);
         stack.shutdown().await.unwrap();
     }
 
@@ -412,14 +435,14 @@ mod tests {
         let addr_b = sock_b.local_addr().unwrap();
 
         let endpoint = CoapEndpoint::start(sock_a).await.unwrap();
-        let stack = CoapStack::start(endpoint).await.unwrap();
+        let (client, _server, stack) = CoapStack::start(endpoint).await.unwrap();
 
         // Client sends a CON request
         let mut request = Packet::new();
         request.header.code = MessageClass::Request(RequestType::Get);
         request.header.set_type(MessageType::Confirmable);
         request.set_token(vec![20, 21]);
-        let response_rx = stack.send_request(request, addr_b).await.unwrap();
+        let response_rx = client.send_request(request, addr_b).await.unwrap();
 
         // Peer B receives the CON request
         let mut buf = [0u8; 2048];
@@ -451,6 +474,8 @@ mod tests {
         let resp = response_rx.await.unwrap().unwrap();
         assert_eq!(resp.payload, b"separate");
 
+        drop(client);
+        drop(_server);
         stack.shutdown().await.unwrap();
     }
 
@@ -462,14 +487,14 @@ mod tests {
         let addr_b = sock_b.local_addr().unwrap();
 
         let endpoint = CoapEndpoint::start(sock_a).await.unwrap();
-        let stack = CoapStack::start(endpoint).await.unwrap();
+        let (client, _server, stack) = CoapStack::start(endpoint).await.unwrap();
 
         // Client sends a CON request
         let mut request = Packet::new();
         request.header.code = MessageClass::Request(RequestType::Get);
         request.header.set_type(MessageType::Confirmable);
         request.set_token(vec![30, 31]);
-        let response_rx = stack.send_request(request, addr_b).await.unwrap();
+        let response_rx = client.send_request(request, addr_b).await.unwrap();
 
         // Peer B receives the request
         let mut buf = [0u8; 2048];
@@ -491,6 +516,8 @@ mod tests {
         let result = response_rx.await.unwrap();
         assert!(matches!(result, Err(TransportError::Reset)));
 
+        drop(client);
+        drop(_server);
         stack.shutdown().await.unwrap();
     }
 
@@ -502,7 +529,7 @@ mod tests {
         let addr_b = sock_b.local_addr().unwrap();
 
         let endpoint = CoapEndpoint::start(sock_a).await.unwrap();
-        let mut stack = CoapStack::start(endpoint).await.unwrap();
+        let (_client, mut server, stack) = CoapStack::start(endpoint).await.unwrap();
 
         // Peer B sends a CON GET request
         let mut request = Packet::new();
@@ -524,10 +551,12 @@ mod tests {
         assert!(matches!(ack.header.code, MessageClass::Empty));
 
         // Server should also receive the request
-        let (req, peer) = stack.recv_request().await.unwrap();
+        let (req, peer) = server.recv_request().await.unwrap();
         assert_eq!(peer, addr_b);
         assert_eq!(req.get_token(), &[40, 41]);
 
+        drop(_client);
+        drop(server);
         stack.shutdown().await.unwrap();
     }
 
@@ -539,7 +568,7 @@ mod tests {
         let _addr_b = sock_b.local_addr().unwrap();
 
         let endpoint = CoapEndpoint::start(sock_a).await.unwrap();
-        let mut stack = CoapStack::start(endpoint).await.unwrap();
+        let (_client, mut server, stack) = CoapStack::start(endpoint).await.unwrap();
 
         // Peer B sends the same NON request twice (same MID)
         let mut request = Packet::new();
@@ -564,12 +593,14 @@ mod tests {
             .unwrap();
 
         // Should receive only the first and the different one (not the duplicate)
-        let (req1, _) = stack.recv_request().await.unwrap();
+        let (req1, _) = server.recv_request().await.unwrap();
         assert_eq!(req1.get_token(), &[50, 51]);
 
-        let (req2, _) = stack.recv_request().await.unwrap();
+        let (req2, _) = server.recv_request().await.unwrap();
         assert_eq!(req2.get_token(), &[52, 53]);
 
+        drop(_client);
+        drop(server);
         stack.shutdown().await.unwrap();
     }
 
@@ -581,20 +612,20 @@ mod tests {
         let addr_b = sock_b.local_addr().unwrap();
 
         let endpoint = CoapEndpoint::start(sock_a).await.unwrap();
-        let stack = CoapStack::start(endpoint).await.unwrap();
+        let (client, _server, stack) = CoapStack::start(endpoint).await.unwrap();
 
         // Send two requests — they should get different MIDs
         let mut req1 = Packet::new();
         req1.header.code = MessageClass::Request(RequestType::Get);
         req1.header.set_type(MessageType::NonConfirmable);
         req1.set_token(vec![60]);
-        let _rx1 = stack.send_request(req1, addr_b).await.unwrap();
+        let _rx1 = client.send_request(req1, addr_b).await.unwrap();
 
         let mut req2 = Packet::new();
         req2.header.code = MessageClass::Request(RequestType::Get);
         req2.header.set_type(MessageType::NonConfirmable);
         req2.set_token(vec![61]);
-        let _rx2 = stack.send_request(req2, addr_b).await.unwrap();
+        let _rx2 = client.send_request(req2, addr_b).await.unwrap();
 
         let mut buf = [0u8; 2048];
         let (n1, _) = sock_b.recv_from(&mut buf).await.unwrap();
@@ -608,6 +639,8 @@ mod tests {
         // MIDs should be sequential (differ by 1)
         assert_eq!(p2.header.message_id, p1.header.message_id.wrapping_add(1));
 
+        drop(client);
+        drop(_server);
         stack.shutdown().await.unwrap();
     }
 
@@ -618,19 +651,21 @@ mod tests {
         let addr_b = sock_b.local_addr().unwrap();
 
         let endpoint = CoapEndpoint::start(sock_a).await.unwrap();
-        let stack = CoapStack::start(endpoint).await.unwrap();
+        let (client, _server, stack) = CoapStack::start(endpoint).await.unwrap();
 
         // Client sends a CON request — peer never responds
         let mut request = Packet::new();
         request.header.code = MessageClass::Request(RequestType::Get);
         request.header.set_type(MessageType::Confirmable);
         request.set_token(vec![70, 71]);
-        let response_rx = stack.send_request(request, addr_b).await.unwrap();
+        let response_rx = client.send_request(request, addr_b).await.unwrap();
 
         // The exchange should eventually time out
         let result = response_rx.await.unwrap();
         assert!(matches!(result, Err(TransportError::Timeout { .. })));
 
+        drop(client);
+        drop(_server);
         stack.shutdown().await.unwrap();
     }
 
@@ -642,7 +677,7 @@ mod tests {
         let _addr_b = sock_b.local_addr().unwrap();
 
         let endpoint = CoapEndpoint::start(sock_a).await.unwrap();
-        let mut stack = CoapStack::start(endpoint).await.unwrap();
+        let (_client, mut server, stack) = CoapStack::start(endpoint).await.unwrap();
 
         // Peer B sends a CON GET request
         let mut request = Packet::new();
@@ -662,7 +697,7 @@ mod tests {
         assert_eq!(ack1.header.message_id, 5555);
 
         // Server receives the request
-        let (req, _) = stack.recv_request().await.unwrap();
+        let (req, _) = server.recv_request().await.unwrap();
         assert_eq!(req.get_token(), &[80, 81]);
 
         // Peer B sends the same CON request again (duplicate)
@@ -675,6 +710,8 @@ mod tests {
         assert_eq!(ack2.header.message_id, 5555);
         assert!(matches!(ack2.header.code, MessageClass::Empty));
 
+        drop(_client);
+        drop(server);
         stack.shutdown().await.unwrap();
     }
 }

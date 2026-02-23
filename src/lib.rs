@@ -1,5 +1,7 @@
 use crate::transport::TransportError;
 
+mod client;
+mod server;
 mod transport;
 
 pub use transport::CoapEndpoint;

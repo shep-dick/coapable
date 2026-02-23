@@ -1,11 +1,14 @@
-mod context;
 mod endpoint;
 mod exchange;
 mod reliability;
 mod session;
+mod stack;
 
-pub use context::CoapStack;
 pub use endpoint::CoapEndpoint;
+pub use stack::CoapStack;
+
+pub(crate) use stack::ClientInterface;
+pub(crate) use stack::ServerInterface;
 
 use thiserror::Error;
 
