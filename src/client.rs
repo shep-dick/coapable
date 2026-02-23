@@ -4,6 +4,9 @@ use coap_lite::CoapRequest;
 
 use crate::transport::ClientInterface;
 
+#[derive(Debug, thiserror::Error)]
+pub enum ClientError {}
+
 pub struct CoapClient {
     interface: ClientInterface,
 }

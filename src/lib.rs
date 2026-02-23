@@ -1,3 +1,5 @@
+use crate::client::ClientError;
+use crate::server::ServerError;
 use crate::transport::TransportError;
 
 mod client;
@@ -11,6 +13,12 @@ pub use transport::CoapStack;
 pub enum Error {
     #[error(transparent)]
     Transport(#[from] TransportError),
+
+    #[error(transparent)]
+    Client(#[from] ClientError),
+
+    #[error(transparent)]
+    Server(#[from] ServerError),
 }
 
 #[cfg(test)]

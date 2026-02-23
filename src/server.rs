@@ -1,5 +1,8 @@
 use crate::transport::ServerInterface;
 
+#[derive(Debug, thiserror::Error)]
+pub enum ServerError {}
+
 pub struct CoapServer {
     interface: ServerInterface,
 }
