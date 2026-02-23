@@ -11,6 +11,9 @@ pub const MAX_LATENCY: Duration = Duration::from_secs(100);
 pub const EXCHANGE_LIFETIME: Duration = Duration::from_secs(247);
 pub const NON_LIFETIME: Duration = Duration::from_secs(145);
 
+// Self-defined parameters
+pub const IDLE_SESSION_CLEANUP_INTERVAL_SECS: u64 = 30;
+
 /// Returns a random ACK timeout in [ACK_TIMEOUT, ACK_TIMEOUT * ACK_RANDOM_FACTOR].
 fn random_ack_timeout() -> Duration {
     let lo = ACK_TIMEOUT.as_secs_f64();

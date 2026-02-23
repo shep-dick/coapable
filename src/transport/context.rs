@@ -5,10 +5,11 @@ use bytes::Bytes;
 use coap_lite::{MessageClass, MessageType, Packet};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
-use tokio::time::Instant;
+use tokio::time::{Duration, Instant};
 
 use super::endpoint::CoapEndpoint;
 use super::exchange::Exchange;
+use super::reliability::IDLE_SESSION_CLEANUP_INTERVAL_SECS;
 use super::session::{AckResult, PeerSession};
 use super::{Result, TransportError};
 
@@ -41,6 +42,9 @@ impl CoapStack {
         let task = tokio::spawn(async move {
             let mut sessions: HashMap<SocketAddr, PeerSession> = HashMap::new();
 
+            let mut next_cleanup =
+                Instant::now() + Duration::from_secs(IDLE_SESSION_CLEANUP_INTERVAL_SECS);
+
             loop {
                 // Compute the soonest retransmit deadline across all sessions.
                 let next_deadline = sessions
@@ -48,12 +52,14 @@ impl CoapStack {
                     .filter_map(|s| s.next_retransmit_deadline())
                     .min();
 
-                let timer = async {
+                let retransmission_timer = async {
                     match next_deadline {
                         Some(deadline) => tokio::time::sleep_until(deadline).await,
                         None => std::future::pending::<()>().await,
                     }
                 };
+
+                let cleanup_timer = tokio::time::sleep_until(next_cleanup);
 
                 tokio::select! {
                     // Inbound: packet from network
@@ -98,18 +104,17 @@ impl CoapStack {
                                     ack.header.message_id = mid;
                                     if let Ok(ack_bytes) = ack.to_bytes() {
                                         endpoint.send_packet(
-                                            Bytes::from(ack_bytes),
+                                            Bytes::copy_from_slice(&ack_bytes),
                                             peer,
                                         ).await?;
+                                        session.cache_response_for_mid(mid, ack_bytes);
                                     }
                                 }
 
                                 // Dispatch by message code
                                 match parsed.header.code {
                                     MessageClass::Request(_) => {
-                                        if server_request_sender.send((parsed, peer)).await.is_err() {
-                                            return Ok(());  // @TODO: don't want to tear down if server is dropped but client is still alive
-                                        }
+                                        let _ = server_request_sender.send((parsed, peer)).await;
                                     }
                                     MessageClass::Response(_) => {
                                         // Separate response (CON or NON with same token)
@@ -194,17 +199,27 @@ impl CoapStack {
                         }
                     }
 
-                    // Timer: retransmission and housekeeping
-                    _ = timer => {
+                    // Retransmission Timer: retransmission and housekeeping
+                    _ = retransmission_timer => {
                         let now = Instant::now();
+                        let mut to_send: Vec<(SocketAddr, Vec<u8>)> = Vec::new();
                         for session in sessions.values_mut() {
                             let retransmits = session.collect_retransmissions(now);
                             let peer = session.peer();
                             for bytes in retransmits {
-                                endpoint.send_packet(Bytes::from(bytes), peer).await?;
+                                to_send.push((peer, bytes));
                             }
                             session.evict_stale_dedup(now);
                         }
+                        for (peer, bytes) in to_send {
+                            endpoint.send_packet(Bytes::from(bytes), peer).await?;
+                        }
+                    }
+
+                    // Session Idle Timeout
+                    _ = cleanup_timer => {
+                        sessions.retain(|_, session| !session.is_idle());
+                        next_cleanup = Instant::now() + Duration::from_secs(IDLE_SESSION_CLEANUP_INTERVAL_SECS);
                     }
                 }
             }
@@ -615,6 +630,50 @@ mod tests {
         // The exchange should eventually time out
         let result = response_rx.await.unwrap();
         assert!(matches!(result, Err(TransportError::Timeout { .. })));
+
+        stack.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn duplicate_con_gets_cached_ack() {
+        let sock_a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr_a = sock_a.local_addr().unwrap();
+        let sock_b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let _addr_b = sock_b.local_addr().unwrap();
+
+        let endpoint = CoapEndpoint::start(sock_a).await.unwrap();
+        let mut stack = CoapStack::start(endpoint).await.unwrap();
+
+        // Peer B sends a CON GET request
+        let mut request = Packet::new();
+        request.header.code = MessageClass::Request(RequestType::Get);
+        request.header.set_type(MessageType::Confirmable);
+        request.header.message_id = 5555;
+        request.set_token(vec![80, 81]);
+        let request_bytes = request.to_bytes().unwrap();
+
+        sock_b.send_to(&request_bytes, addr_a).await.unwrap();
+
+        // Peer B receives the auto-ACK
+        let mut buf = [0u8; 2048];
+        let (n, _) = sock_b.recv_from(&mut buf).await.unwrap();
+        let ack1 = Packet::from_bytes(&buf[..n]).unwrap();
+        assert_eq!(ack1.header.get_type(), MessageType::Acknowledgement);
+        assert_eq!(ack1.header.message_id, 5555);
+
+        // Server receives the request
+        let (req, _) = stack.recv_request().await.unwrap();
+        assert_eq!(req.get_token(), &[80, 81]);
+
+        // Peer B sends the same CON request again (duplicate)
+        sock_b.send_to(&request_bytes, addr_a).await.unwrap();
+
+        // Peer B should receive a second ACK with the same MID
+        let (n2, _) = sock_b.recv_from(&mut buf).await.unwrap();
+        let ack2 = Packet::from_bytes(&buf[..n2]).unwrap();
+        assert_eq!(ack2.header.get_type(), MessageType::Acknowledgement);
+        assert_eq!(ack2.header.message_id, 5555);
+        assert!(matches!(ack2.header.code, MessageClass::Empty));
 
         stack.shutdown().await.unwrap();
     }

@@ -42,6 +42,13 @@ impl PeerSession {
         self.peer
     }
 
+    /// Returns true if this session has no active state and can be evicted.
+    pub fn is_idle(&self) -> bool {
+        self.exchanges.is_empty()
+            && self.mid_to_token.is_empty()
+            && self.inbound_dedup.is_empty()
+    }
+
     /// Allocate the next MID for an outbound message.
     pub fn allocate_mid(&mut self) -> u16 {
         self.mid_allocator.allocate()
@@ -177,5 +184,30 @@ impl PeerSession {
             .values()
             .filter_map(|e| e.retransmit_deadline())
             .min()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn session_idle_lifecycle() {
+        tokio::time::pause();
+        let peer = "127.0.0.1:5683".parse().unwrap();
+        let mut session = PeerSession::new(peer);
+
+        // Fresh session is idle
+        assert!(session.is_idle());
+
+        // Recording an inbound MID makes it non-idle
+        let now = Instant::now();
+        session.record_inbound_mid(1000, now);
+        assert!(!session.is_idle());
+
+        // Evicting dedup entries after EXCHANGE_LIFETIME makes it idle again
+        tokio::time::advance(EXCHANGE_LIFETIME).await;
+        session.evict_stale_dedup(Instant::now());
+        assert!(session.is_idle());
     }
 }

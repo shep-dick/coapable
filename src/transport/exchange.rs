@@ -5,7 +5,6 @@ use tokio::sync::oneshot;
 use tokio::time::Instant;
 
 use super::reliability::RetransmitState;
-use crate::Error;
 use crate::transport::TransportError;
 
 pub struct Exchange {
