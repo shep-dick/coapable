@@ -53,13 +53,15 @@ impl CoapEndpoint {
         self.inbound_receiver
             .recv()
             .await
-            .ok_or(TransportError::Closed)
+            .ok_or(TransportError::EndpointClosed)
     }
 
     pub async fn shutdown(self) -> Result<()> {
         drop(self.outbound_sender);
         drop(self.inbound_receiver);
-        self.task.await.map_err(|_| TransportError::Closed)?
+        self.task
+            .await
+            .map_err(|_| TransportError::EndpointClosed)?
     }
 }
 

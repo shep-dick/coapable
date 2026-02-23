@@ -2,19 +2,13 @@ use crate::transport::TransportError;
 
 mod transport;
 
-pub use transport::CoapContext;
 pub use transport::CoapEndpoint;
+pub use transport::CoapStack;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error(transparent)]
-    Socket(#[from] TransportError),
-
-    #[error("request timed out after {retransmits} retransmissions")]
-    Timeout { retransmits: u32 },
-
-    #[error("peer sent RST")]
-    Reset,
+    Transport(#[from] TransportError),
 }
 
 #[cfg(test)]
@@ -23,7 +17,7 @@ mod tests {
 
     #[test]
     fn error_constructor() {
-        let e = Error::Socket(TransportError::Io(std::io::Error::from_raw_os_error(22)));
+        let e = Error::Transport(TransportError::Io(std::io::Error::from_raw_os_error(22)));
         println!("error: {:?}", e);
     }
 }

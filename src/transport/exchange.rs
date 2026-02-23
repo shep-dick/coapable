@@ -6,11 +6,12 @@ use tokio::time::Instant;
 
 use super::reliability::RetransmitState;
 use crate::Error;
+use crate::transport::TransportError;
 
 pub struct Exchange {
     token: Vec<u8>,
     peer: SocketAddr,
-    response_tx: oneshot::Sender<Result<Packet, Error>>,
+    response_tx: oneshot::Sender<Result<Packet, TransportError>>,
     /// MID assigned to the outbound CON. None for NON exchanges.
     message_id: Option<u16>,
     /// Retransmission state, present only for CON exchanges.
@@ -22,7 +23,7 @@ impl Exchange {
     pub fn new_con(
         token: Vec<u8>,
         peer: SocketAddr,
-        response_tx: oneshot::Sender<Result<Packet, Error>>,
+        response_tx: oneshot::Sender<Result<Packet, TransportError>>,
         message_id: u16,
         packet_bytes: Vec<u8>,
         now: Instant,
@@ -40,7 +41,7 @@ impl Exchange {
     pub fn new_non(
         token: Vec<u8>,
         peer: SocketAddr,
-        response_tx: oneshot::Sender<Result<Packet, Error>>,
+        response_tx: oneshot::Sender<Result<Packet, TransportError>>,
     ) -> Self {
         Self {
             token,
@@ -104,7 +105,7 @@ impl Exchange {
     }
 
     /// Fail the exchange with an error. Consumes the exchange.
-    pub fn fail(self, error: Error) {
+    pub fn fail(self, error: TransportError) {
         let _ = self.response_tx.send(Err(error));
     }
 }

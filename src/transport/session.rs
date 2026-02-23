@@ -6,7 +6,6 @@ use tokio::time::Instant;
 
 use super::exchange::Exchange;
 use super::reliability::{DedupEntry, EXCHANGE_LIFETIME, MessageIdAllocator};
-use crate::Error;
 
 pub struct PeerSession {
     peer: SocketAddr,
@@ -101,7 +100,7 @@ impl PeerSession {
     pub fn handle_rst(&mut self, mid: u16) -> bool {
         if let Some(token) = self.mid_to_token.remove(&mid) {
             if let Some(exchange) = self.exchanges.remove(&token) {
-                exchange.fail(Error::Reset);
+                exchange.fail(super::TransportError::Reset);
                 return true;
             }
         }
@@ -159,7 +158,7 @@ impl PeerSession {
                     self.mid_to_token.remove(&mid);
                 }
                 let count = exchange.retransmit_count();
-                exchange.fail(Error::Timeout { retransmits: count });
+                exchange.fail(super::TransportError::Timeout { retransmits: count });
             }
         }
 

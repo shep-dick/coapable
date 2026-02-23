@@ -4,7 +4,7 @@ mod exchange;
 mod reliability;
 mod session;
 
-pub use context::CoapContext;
+pub use context::CoapStack;
 pub use endpoint::CoapEndpoint;
 
 use thiserror::Error;
@@ -20,5 +20,11 @@ pub enum TransportError {
     Send(#[from] tokio::sync::mpsc::error::SendError<(bytes::Bytes, std::net::SocketAddr)>),
 
     #[error("endpoint closed")]
-    Closed,
+    EndpointClosed,
+
+    #[error("request timed out after {retransmits} retransmissions")]
+    Timeout { retransmits: u32 },
+
+    #[error("peer sent RST")]
+    Reset,
 }
