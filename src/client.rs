@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use coap_lite::{
     CoapOption, ContentFormat, MessageClass, MessageType, Packet, RequestType, ResponseType,
@@ -13,6 +14,9 @@ pub enum ClientError {
 
     #[error("response channel closed unexpectedly")]
     ChannelClosed,
+
+    #[error("request timed out")]
+    Timeout,
 }
 
 type Result<T> = std::result::Result<T, ClientError>;
@@ -61,6 +65,7 @@ pub struct RequestBuilder {
     accept: Option<ContentFormat>,
     confirmable: bool,
     token: Option<Vec<u8>>,
+    timeout: Duration,
 }
 
 impl RequestBuilder {
@@ -76,6 +81,7 @@ impl RequestBuilder {
             accept: None,
             confirmable: true,
             token: None,
+            timeout: Duration::from_secs(30),
         }
     }
 
@@ -124,6 +130,12 @@ impl RequestBuilder {
         self
     }
 
+    /// Sets the request timeout (default: 30 seconds).
+    pub fn timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
     /// Builds the packet, sends the request, and awaits the response.
     pub async fn send(self) -> Result<CoapResponse> {
         let mut packet = Packet::new();
@@ -168,9 +180,12 @@ impl RequestBuilder {
         }
 
         let response_rx = self.interface.send_request(packet, self.peer).await?;
-        let packet = response_rx
-            .await
-            .map_err(|_| ClientError::ChannelClosed)??;
+        let packet = match tokio::time::timeout(self.timeout, response_rx).await {
+            Ok(Ok(Ok(packet))) => packet,
+            Ok(Ok(Err(transport_err))) => return Err(transport_err.into()),
+            Ok(Err(_)) => return Err(ClientError::ChannelClosed),
+            Err(_) => return Err(ClientError::Timeout),
+        };
 
         Ok(CoapResponse { packet })
     }
@@ -423,6 +438,45 @@ mod tests {
         assert_eq!(resp.status(), ResponseType::Content);
         assert_eq!(resp.payload(), b"reliable data");
 
+        drop(_server);
+        stack.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn client_timeout_fires() {
+        use tokio::task::yield_now;
+        use tokio::time::{Duration, advance};
+
+        // Bind two UDP sockets (peer never responds)
+        let sock_a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let sock_b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr_b = sock_b.local_addr().unwrap();
+
+        // Start stack
+        let endpoint = CoapEndpoint::start(sock_a).await.unwrap();
+        let (client_if, _server, stack) = CoapStack::start(endpoint).await.unwrap();
+
+        // IMPORTANT: let background tasks start polling
+        yield_now().await;
+
+        let client = CoapClient::new(client_if);
+
+        // Spawn the request so it is actively polled
+        let handle = tokio::spawn(async move {
+            client
+                .get(addr_b)
+                .path("/slow")
+                .confirmable(false) // NON request
+                .timeout(Duration::from_secs(2))
+                .send()
+                .await
+        });
+
+        let result = handle.await.unwrap();
+
+        assert!(matches!(result, Err(ClientError::Timeout)));
+
+        // Clean shutdown
         drop(_server);
         stack.shutdown().await.unwrap();
     }

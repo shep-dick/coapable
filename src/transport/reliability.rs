@@ -156,9 +156,7 @@ mod tests {
 
     #[test]
     fn token_allocator_wraps() {
-        let mut alloc = TokenAllocator {
-            next: u32::MAX - 1,
-        };
+        let mut alloc = TokenAllocator { next: u32::MAX - 1 };
         assert_eq!(alloc.allocate(), (u32::MAX - 1).to_be_bytes().to_vec());
         assert_eq!(alloc.allocate(), u32::MAX.to_be_bytes().to_vec());
         assert_eq!(alloc.allocate(), 0u32.to_be_bytes().to_vec());

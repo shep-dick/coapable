@@ -4,7 +4,7 @@ use coap_lite::Packet;
 use tokio::sync::oneshot;
 use tokio::time::Instant;
 
-use super::reliability::RetransmitState;
+use super::reliability::{RetransmitState, NON_LIFETIME};
 use crate::transport::TransportError;
 
 pub struct Exchange {
@@ -15,6 +15,8 @@ pub struct Exchange {
     message_id: Option<u16>,
     /// Retransmission state, present only for CON exchanges.
     retransmit: Option<RetransmitState>,
+    /// Absolute expiry deadline for NON exchanges. None for CON.
+    expires_at: Option<Instant>,
 }
 
 impl Exchange {
@@ -33,14 +35,16 @@ impl Exchange {
             response_tx,
             message_id: Some(message_id),
             retransmit: Some(RetransmitState::new(packet_bytes, now)),
+            expires_at: None,
         }
     }
 
-    /// Create an exchange for a NON request (no retransmission).
+    /// Create an exchange for a NON request (no retransmission, expires after NON_LIFETIME).
     pub fn new_non(
         token: Vec<u8>,
         peer: SocketAddr,
         response_tx: oneshot::Sender<Result<Packet, TransportError>>,
+        now: Instant,
     ) -> Self {
         Self {
             token,
@@ -48,6 +52,7 @@ impl Exchange {
             response_tx,
             message_id: None,
             retransmit: None,
+            expires_at: Some(now + NON_LIFETIME),
         }
     }
 
@@ -88,6 +93,16 @@ impl Exchange {
     /// Return the retransmission deadline, if one is active.
     pub fn retransmit_deadline(&self) -> Option<Instant> {
         self.retransmit.as_ref().map(|r| r.deadline())
+    }
+
+    /// Return the expiry deadline for NON exchanges, if set.
+    pub fn expiry_deadline(&self) -> Option<Instant> {
+        self.expires_at
+    }
+
+    /// Check if this NON exchange has exceeded its lifetime.
+    pub fn is_expired(&self, now: Instant) -> bool {
+        self.expires_at.is_some_and(|deadline| now >= deadline)
     }
 
     /// Return the retransmit count (for error reporting).

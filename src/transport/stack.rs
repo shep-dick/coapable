@@ -232,7 +232,7 @@ impl CoapStack {
                                         Instant::now(),
                                     )
                                 } else {
-                                    Exchange::new_non(token.clone(), peer, response_tx)
+                                    Exchange::new_non(token.clone(), peer, response_tx, Instant::now())
                                 };
 
                                 if is_con {
@@ -667,6 +667,31 @@ mod tests {
         // The exchange should eventually time out
         let result = response_rx.await.unwrap();
         assert!(matches!(result, Err(TransportError::Timeout { .. })));
+
+        drop(client);
+        drop(_server);
+        stack.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn non_request_timeout() {
+        let sock_a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let sock_b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr_b = sock_b.local_addr().unwrap();
+
+        let endpoint = CoapEndpoint::start(sock_a).await.unwrap();
+        let (client, _server, stack) = CoapStack::start(endpoint).await.unwrap();
+
+        // Client sends a NON request — peer never responds
+        let mut request = Packet::new();
+        request.header.code = MessageClass::Request(RequestType::Get);
+        request.header.set_type(MessageType::NonConfirmable);
+        request.set_token(vec![90, 91]);
+        let response_rx = client.send_request(request, addr_b).await.unwrap();
+
+        // The exchange should expire after NON_LIFETIME
+        let result = response_rx.await.unwrap();
+        assert!(matches!(result, Err(TransportError::Timeout { retransmits: 0 })));
 
         drop(client);
         drop(_server);

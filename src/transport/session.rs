@@ -153,7 +153,7 @@ impl PeerSession {
     }
 
     /// Collect exchanges that need retransmission. Returns bytes to re-send.
-    /// Fails exchanges that have exceeded MAX_RETRANSMIT.
+    /// Fails exchanges that have exceeded MAX_RETRANSMIT or NON_LIFETIME.
     pub fn collect_retransmissions(&mut self, now: Instant) -> Vec<Vec<u8>> {
         let mut retransmits = Vec::new();
         let mut expired_tokens = Vec::new();
@@ -164,6 +164,8 @@ impl PeerSession {
                     Some(bytes) => retransmits.push(bytes),
                     None => expired_tokens.push(token.clone()),
                 }
+            } else if exchange.is_expired(now) {
+                expired_tokens.push(token.clone());
             }
         }
 
@@ -186,11 +188,11 @@ impl PeerSession {
             .retain(|_, entry| now.duration_since(entry.created) < EXCHANGE_LIFETIME);
     }
 
-    /// Return the soonest retransmit deadline across all exchanges.
+    /// Return the soonest deadline across all exchanges (retransmit or NON expiry).
     pub fn next_retransmit_deadline(&self) -> Option<Instant> {
         self.exchanges
             .values()
-            .filter_map(|e| e.retransmit_deadline())
+            .filter_map(|e| e.retransmit_deadline().or(e.expiry_deadline()))
             .min()
     }
 }
