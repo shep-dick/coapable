@@ -5,12 +5,16 @@ use coap_lite::{
     CoapOption, ContentFormat, MessageClass, MessageType, Packet, RequestType, ResponseType,
 };
 
+use crate::message_types::CoapResponse;
 use crate::transport::ClientInterface;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
     #[error(transparent)]
     Transport(#[from] crate::transport::TransportError),
+
+    #[error(transparent)]
+    Message(#[from] crate::message_types::MessageError),
 
     #[error("response channel closed unexpectedly")]
     ChannelClosed,
@@ -187,42 +191,7 @@ impl RequestBuilder {
             Err(_) => return Err(ClientError::Timeout),
         };
 
-        Ok(CoapResponse { packet })
-    }
-}
-
-/// A CoAP response received from a peer.
-pub struct CoapResponse {
-    packet: Packet,
-}
-
-impl CoapResponse {
-    /// Returns the response status code.
-    pub fn status(&self) -> ResponseType {
-        match self.packet.header.code {
-            MessageClass::Response(code) => code,
-            _ => unreachable!("non-response packet in CoapResponse"),
-        }
-    }
-
-    /// Returns the response payload as bytes.
-    pub fn payload(&self) -> &[u8] {
-        &self.packet.payload
-    }
-
-    /// Returns the payload as a UTF-8 string, if valid.
-    pub fn payload_string(&self) -> Option<&str> {
-        std::str::from_utf8(&self.packet.payload).ok()
-    }
-
-    /// Returns the Content-Format of the response, if present.
-    pub fn content_format(&self) -> Option<ContentFormat> {
-        self.packet.get_content_format()
-    }
-
-    /// Consumes the response and returns the underlying packet.
-    pub fn into_packet(self) -> Packet {
-        self.packet
+        Ok(CoapResponse::from_packet(packet)?)
     }
 }
 
@@ -445,7 +414,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn client_timeout_fires() {
         use tokio::task::yield_now;
-        use tokio::time::{Duration, advance};
+        use tokio::time::Duration;
 
         // Bind two UDP sockets (peer never responds)
         let sock_a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
