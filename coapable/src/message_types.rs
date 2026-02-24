@@ -1,6 +1,8 @@
 use std::net::SocketAddr;
 
-use coap_lite::{CoapOption, ContentFormat, MessageClass, Packet, RequestType, ResponseType};
+use coap_lite::{
+    CoapOption, ContentFormat, MessageClass, MessageType, Packet, RequestType, ResponseType,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum MessageError {
@@ -14,6 +16,20 @@ pub struct CoapResponse {
 }
 
 impl CoapResponse {
+    // Constructor
+    pub fn new() -> Self {
+        Self {
+            packet: Packet::new(),
+        }
+    }
+
+    // Builder functions
+    pub fn message_code(mut self, code: MessageClass) -> Self {
+        self.packet.header.set_code(&code.to_string());
+        self
+    }
+
+    // From raw packet constructor
     pub fn from_packet(packet: Packet) -> Result<Self, MessageError> {
         match packet.header.code {
             MessageClass::Response(_) => Ok(Self { packet }),

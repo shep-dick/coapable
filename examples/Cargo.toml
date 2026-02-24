@@ -1,2 +1,6 @@
 [workspace]
-members = ["*"]
+members = ["simple_coap"]
+
+[workspace.dependencies]
+coapable = { path = "../coapable" }
+tokio = { version = "1.49.0", features = ["full"] }

@@ -15,7 +15,7 @@ impl CoapServer {
         Self { interface, router }
     }
 
-    pub async fn run(&mut self) {
+    pub async fn run(mut self) {
         loop {
             let (packet, peer) = match self.interface.recv_request().await {
                 Ok(req) => req,
