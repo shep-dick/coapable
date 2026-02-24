@@ -113,6 +113,39 @@ impl Router {
         self
     }
 
+    pub fn merge(mut self, other: Router) -> Self {
+        for (path, method_router) in other.routes {
+            match self.routes.entry(path) {
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    entry.get_mut().merge(method_router);
+                }
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(method_router);
+                }
+            }
+        }
+        self
+    }
+
+    pub fn nest(self, prefix: &str, other: Router) -> Self {
+        let prefix = normalize_path(prefix);
+        let nested = Router {
+            routes: other
+                .routes
+                .into_iter()
+                .map(|(path, mr)| {
+                    let full = if path == "/" {
+                        prefix.clone()
+                    } else {
+                        format!("{}{}", prefix, path)
+                    };
+                    (full, mr)
+                })
+                .collect(),
+        };
+        self.merge(nested)
+    }
+
     pub(crate) async fn dispatch(&self, req: CoapRequest) -> CoapResponse {
         let path = req.path();
         match self.routes.get(&path) {
@@ -197,6 +230,72 @@ mod tests {
         let req = make_request(RequestType::Post, "/resource");
         let resp = router.dispatch(req).await;
         assert_eq!(resp.status(), ResponseType::MethodNotAllowed);
+    }
+
+    #[tokio::test]
+    async fn merge_combines_routers() {
+        async fn handle_a(_req: CoapRequest) -> CoapResponse {
+            let mut packet = Packet::new();
+            packet.header.code = MessageClass::Response(ResponseType::Content);
+            packet.payload = b"a".to_vec();
+            CoapResponse::from_packet(packet).unwrap()
+        }
+
+        async fn handle_b(_req: CoapRequest) -> CoapResponse {
+            let mut packet = Packet::new();
+            packet.header.code = MessageClass::Response(ResponseType::Content);
+            packet.payload = b"b".to_vec();
+            CoapResponse::from_packet(packet).unwrap()
+        }
+
+        let r1 = Router::new().route("/a", get(handle_a));
+        let r2 = Router::new().route("/b", get(handle_b));
+        let router = r1.merge(r2);
+
+        let resp = router.dispatch(make_request(RequestType::Get, "/a")).await;
+        assert_eq!(resp.payload(), b"a");
+
+        let resp = router.dispatch(make_request(RequestType::Get, "/b")).await;
+        assert_eq!(resp.payload(), b"b");
+    }
+
+    #[tokio::test]
+    async fn nest_prefixes_routes() {
+        async fn handle_users(_req: CoapRequest) -> CoapResponse {
+            let mut packet = Packet::new();
+            packet.header.code = MessageClass::Response(ResponseType::Content);
+            packet.payload = b"users".to_vec();
+            CoapResponse::from_packet(packet).unwrap()
+        }
+
+        async fn handle_posts(_req: CoapRequest) -> CoapResponse {
+            let mut packet = Packet::new();
+            packet.header.code = MessageClass::Response(ResponseType::Content);
+            packet.payload = b"posts".to_vec();
+            CoapResponse::from_packet(packet).unwrap()
+        }
+
+        let api = Router::new()
+            .route("/users", get(handle_users))
+            .route("/posts", get(handle_posts));
+
+        let router = Router::new().nest("/api/v1", api);
+
+        let resp = router
+            .dispatch(make_request(RequestType::Get, "/api/v1/users"))
+            .await;
+        assert_eq!(resp.payload(), b"users");
+
+        let resp = router
+            .dispatch(make_request(RequestType::Get, "/api/v1/posts"))
+            .await;
+        assert_eq!(resp.payload(), b"posts");
+
+        // original unprefixed path should not match
+        let resp = router
+            .dispatch(make_request(RequestType::Get, "/users"))
+            .await;
+        assert_eq!(resp.status(), ResponseType::NotFound);
     }
 
     #[tokio::test]
