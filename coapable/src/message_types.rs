@@ -63,7 +63,7 @@ impl CoapResponse {
         CoapResponseBuilder::new(response_type)
     }
 
-    pub fn from_packet(packet: &Packet) -> Result<Self> {
+    pub(crate) fn from_packet(packet: &Packet) -> Result<Self> {
         let response_type = match packet.header.code {
             MessageClass::Response(code) => Ok(code),
             _ => Err(MessageError::NotAResponse),
@@ -96,14 +96,13 @@ impl CoapResponse {
         self.content_format
     }
 
-    pub fn to_packet(self, token: Vec<u8>, mid: u16) -> Packet {
+    pub(crate) fn to_packet(self, token: Vec<u8>, mid: u16) -> Packet {
         let mut pkt = Packet::new();
 
         pkt.set_token(token);
         pkt.header.message_id = mid;
 
-        pkt.header
-            .set_code(&MessageClass::Response(self.response_type).to_string());
+        pkt.header.code = MessageClass::Response(self.response_type);
 
         pkt.payload = self.payload;
 
@@ -139,7 +138,7 @@ impl CoapRequestBuilder {
     }
 
     pub fn path(mut self, path: &str) -> Self {
-        self.path.push_str(path);
+        self.path = path.to_string();
         self
     }
 
@@ -196,7 +195,7 @@ impl CoapRequest {
         CoapRequestBuilder::new(method)
     }
 
-    pub fn from_packet(packet: &Packet) -> Result<Self> {
+    pub(crate) fn from_packet(packet: &Packet) -> Result<Self> {
         let method = match packet.header.code {
             MessageClass::Request(code) => Ok(code),
             _ => Err(MessageError::NotARequest),
@@ -211,7 +210,7 @@ impl CoapRequest {
                     .collect();
                 format!("/{}", segments.join("/"))
             })
-            .unwrap_or_default();
+            .unwrap_or_else(|| "/".to_string());
 
         let queries = packet
             .get_option(CoapOption::UriQuery)
@@ -262,9 +261,10 @@ impl CoapRequest {
     }
 
     pub fn queries(&self) -> Option<&Vec<String>> {
-        match self.queries.as_slice() {
-            [] => None,
-            _ => Some(&self.queries),
+        if !self.queries.is_empty() {
+            Some(&self.queries)
+        } else {
+            None
         }
     }
 
@@ -288,7 +288,7 @@ impl CoapRequest {
         self.confirmable
     }
 
-    pub fn to_packet(self, token: Vec<u8>, mid: u16) -> Packet {
+    pub(crate) fn to_packet(self, token: Vec<u8>, mid: u16) -> Packet {
         let mut pkt = Packet::new();
 
         pkt.set_token(token);
@@ -296,7 +296,12 @@ impl CoapRequest {
 
         pkt.header.code = MessageClass::Request(self.method);
 
-        if self.path.as_bytes() != [] {
+        pkt.header.set_type(match self.confirmable {
+            true => MessageType::Confirmable,
+            false => MessageType::NonConfirmable,
+        });
+
+        if self.path.is_empty() {
             for segment in self.path.split('/').filter(|s| !s.is_empty()) {
                 pkt.add_option(CoapOption::UriPath, segment.as_bytes().to_vec());
             }
@@ -315,7 +320,7 @@ impl CoapRequest {
             pkt.add_option_as(CoapOption::Accept, OptionValueU16(value));
         }
 
-        if self.payload.as_slice() != [] {
+        if self.payload.is_empty() {
             pkt.payload = self.payload
         }
 

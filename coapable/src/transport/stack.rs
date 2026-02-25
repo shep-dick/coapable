@@ -231,12 +231,7 @@ impl CoapStack {
                                 let token = session.allocate_token();
                                 let mid = session.allocate_mid();
 
-
-                                // @TODO: turn CoapRequest into coap_lite::Packet
-
-
                                 let is_con = req.request.confirmable();
-
                                 let pkt = req.request.to_packet(token.clone(), mid);
 
                                 let bytes = match pkt.to_bytes() {
