@@ -1,3 +1,4 @@
+use coap_lite::ResponseType;
 use coapable::{
     CoapClient, CoapEndpoint, CoapRequest, CoapResponse, CoapServer, CoapStack, Router, get,
 };
@@ -23,14 +24,11 @@ async fn main() {
         .await
         .unwrap();
 
-    println!(
-        "Received response with code {:?}",
-        response.into_packet().header.code
-    );
+    println!("Received response with code {:?}", response.status());
 
     server_task.abort();
 }
 
 async fn get_info(req: CoapRequest) -> CoapResponse {
-    CoapResponse::method_not_allowed()
+    CoapResponse::new(ResponseType::MethodNotAllowed).build()
 }

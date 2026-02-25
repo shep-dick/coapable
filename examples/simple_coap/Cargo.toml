@@ -4,5 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+coap-lite = "0.13.3"
 coapable = { workspace = true }
 tokio = { workspace = true }

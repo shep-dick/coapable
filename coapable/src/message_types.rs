@@ -1,5 +1,5 @@
 use coap_lite::{
-    CoapOption, ContentFormat, MessageClass, Packet, RequestType, ResponseType,
+    CoapOption, ContentFormat, MessageClass, MessageType, Packet, RequestType, ResponseType,
     option_value::OptionValueU16,
 };
 
@@ -9,6 +9,9 @@ type Result<T> = std::result::Result<T, MessageError>;
 pub enum MessageError {
     #[error("packet is not a response")]
     NotAResponse,
+
+    #[error("packet is not a request")]
+    NotARequest,
 
     #[error("invalid URI path")]
     InvalidUriPath,
@@ -35,7 +38,7 @@ impl CoapResponseBuilder {
     }
 
     pub fn payload(mut self, payload: &[u8]) -> Self {
-        self.payload.clone_from_slice(payload);
+        self.payload = payload.to_vec();
         self
     }
 
@@ -151,7 +154,7 @@ impl CoapRequestBuilder {
     }
 
     pub fn payload(mut self, payload: &[u8]) -> Self {
-        self.payload.clone_from_slice(payload);
+        self.payload = payload.to_vec();
         self
     }
 
@@ -191,6 +194,47 @@ pub struct CoapRequest {
 impl CoapRequest {
     pub fn new(method: RequestType) -> CoapRequestBuilder {
         CoapRequestBuilder::new(method)
+    }
+
+    pub fn from_packet(packet: &Packet) -> Result<Self> {
+        let method = match packet.header.code {
+            MessageClass::Request(code) => Ok(code),
+            _ => Err(MessageError::NotARequest),
+        }?;
+
+        let path = packet
+            .get_option(CoapOption::UriPath)
+            .map(|opts| {
+                let segments: Vec<&str> = opts
+                    .iter()
+                    .filter_map(|v| std::str::from_utf8(v).ok())
+                    .collect();
+                format!("/{}", segments.join("/"))
+            })
+            .unwrap_or_default();
+
+        let queries = packet
+            .get_option(CoapOption::UriQuery)
+            .map(|opts| {
+                opts.iter()
+                    .filter_map(|v| String::from_utf8(v.clone()).ok())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        let content_format = packet.get_content_format();
+        let payload = packet.payload.to_owned();
+        let confirmable = packet.header.get_type() == MessageType::Confirmable;
+
+        Ok(Self {
+            method,
+            path,
+            queries,
+            content_format,
+            payload,
+            accept: None,
+            confirmable,
+        })
     }
 
     pub fn method(&self) -> RequestType {

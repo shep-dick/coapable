@@ -171,8 +171,6 @@ fn normalize_path(path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::net::SocketAddr;
-
     use coap_lite::{MessageClass, Packet, RequestType, ResponseType};
 
     use super::*;
@@ -185,8 +183,7 @@ mod tests {
                 packet.add_option(coap_lite::CoapOption::UriPath, segment.as_bytes().to_vec());
             }
         }
-        let peer: SocketAddr = "127.0.0.1:5683".parse().unwrap();
-        CoapRequest::from_raw(packet, peer)
+        CoapRequest::from_packet(&packet).unwrap()
     }
 
     #[tokio::test]
@@ -195,7 +192,7 @@ mod tests {
             let mut packet = Packet::new();
             packet.header.code = MessageClass::Response(ResponseType::Content);
             packet.payload = b"22.5".to_vec();
-            CoapResponse::from_packet(packet).unwrap()
+            CoapResponse::from_packet(&packet).unwrap()
         }
 
         let router = Router::new().route("/sensors/temp", get(handle_temp));
@@ -209,7 +206,7 @@ mod tests {
     #[tokio::test]
     async fn returns_not_found_for_unknown_path() {
         async fn handle(_req: CoapRequest) -> CoapResponse {
-            CoapResponse::not_implemented()
+            CoapResponse::new(ResponseType::Content).build()
         }
 
         let router = Router::new().route("/known", get(handle));
@@ -222,7 +219,7 @@ mod tests {
     #[tokio::test]
     async fn returns_method_not_allowed() {
         async fn handle(_req: CoapRequest) -> CoapResponse {
-            CoapResponse::not_implemented()
+            CoapResponse::new(ResponseType::Content).build()
         }
 
         let router = Router::new().route("/resource", get(handle));
@@ -238,14 +235,14 @@ mod tests {
             let mut packet = Packet::new();
             packet.header.code = MessageClass::Response(ResponseType::Content);
             packet.payload = b"a".to_vec();
-            CoapResponse::from_packet(packet).unwrap()
+            CoapResponse::from_packet(&packet).unwrap()
         }
 
         async fn handle_b(_req: CoapRequest) -> CoapResponse {
             let mut packet = Packet::new();
             packet.header.code = MessageClass::Response(ResponseType::Content);
             packet.payload = b"b".to_vec();
-            CoapResponse::from_packet(packet).unwrap()
+            CoapResponse::from_packet(&packet).unwrap()
         }
 
         let r1 = Router::new().route("/a", get(handle_a));
@@ -265,14 +262,14 @@ mod tests {
             let mut packet = Packet::new();
             packet.header.code = MessageClass::Response(ResponseType::Content);
             packet.payload = b"users".to_vec();
-            CoapResponse::from_packet(packet).unwrap()
+            CoapResponse::from_packet(&packet).unwrap()
         }
 
         async fn handle_posts(_req: CoapRequest) -> CoapResponse {
             let mut packet = Packet::new();
             packet.header.code = MessageClass::Response(ResponseType::Content);
             packet.payload = b"posts".to_vec();
-            CoapResponse::from_packet(packet).unwrap()
+            CoapResponse::from_packet(&packet).unwrap()
         }
 
         let api = Router::new()
@@ -303,13 +300,13 @@ mod tests {
         async fn handle_get(_req: CoapRequest) -> CoapResponse {
             let mut packet = Packet::new();
             packet.header.code = MessageClass::Response(ResponseType::Content);
-            CoapResponse::from_packet(packet).unwrap()
+            CoapResponse::from_packet(&packet).unwrap()
         }
 
         async fn handle_post(_req: CoapRequest) -> CoapResponse {
             let mut packet = Packet::new();
             packet.header.code = MessageClass::Response(ResponseType::Created);
-            CoapResponse::from_packet(packet).unwrap()
+            CoapResponse::from_packet(&packet).unwrap()
         }
 
         let router = Router::new().route("/lights", get(handle_get).post(handle_post));

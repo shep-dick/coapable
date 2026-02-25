@@ -175,12 +175,17 @@ impl CoapStack {
                                 // Dispatch by message code
                                 match parsed.header.code {
                                     MessageClass::Request(_) => {
-                                        let _ = server_request_sender.send((parsed, peer)).await;
+                                        let token = parsed.get_token().to_vec();
+                                        if let Ok(request) = CoapRequest::from_packet(&parsed) {
+                                            let _ = server_request_sender.send(ServerRequest { request, peer, token }).await;
+                                        }
                                     }
                                     MessageClass::Response(_) => {
                                         // Separate response (CON or NON with same token)
                                         let token = parsed.get_token().to_vec();
-                                        session.complete_exchange(&token, parsed);
+                                        if let Ok(response) = CoapResponse::from_packet(&parsed) {
+                                            session.complete_exchange(&token, response);
+                                        }
                                     }
                                     MessageClass::Empty => {
                                         // Empty CON = CoAP ping (already auto-ACKed above)
@@ -198,7 +203,9 @@ impl CoapStack {
                                         // Piggybacked response
                                         match session.handle_ack(mid, &parsed) {
                                             AckResult::PiggybackedResponse(token) => {
-                                                session.complete_exchange(&token, parsed);
+                                                if let Ok(response) = CoapResponse::from_packet(&parsed) {
+                                                    session.complete_exchange(&token, response);
+                                                }
                                             }
                                             _ => {}
                                         }
@@ -357,13 +364,10 @@ mod tests {
             .await
             .unwrap();
 
-        let (req, peer) = server.recv_request().await.unwrap();
-        assert_eq!(peer, addr_b);
-        assert!(matches!(
-            req.header.code,
-            MessageClass::Request(RequestType::Get)
-        ));
-        assert_eq!(req.get_token(), &[1, 2, 3, 4]);
+        let req = server.recv_request().await.unwrap();
+        assert_eq!(req.peer, addr_b);
+        assert!(matches!(req.request.method(), RequestType::Get));
+        assert_eq!(req.token, &[1, 2, 3, 4]);
 
         drop(_client);
         drop(server);
@@ -381,24 +385,28 @@ mod tests {
         let (client, _server, stack) = CoapStack::start(endpoint).await.unwrap();
 
         // Client sends a NON request to peer B
-        let mut request = Packet::new();
-        request.header.code = MessageClass::Request(RequestType::Get);
-        request.header.set_type(MessageType::NonConfirmable);
-        request.set_token(vec![5, 6, 7, 8]);
-        let response_rx = client.send_request(request, addr_b).await.unwrap();
+        let request = CoapRequest::new(RequestType::Get)
+            .confirmable(false)
+            .build();
+        let client_request = ClientRequest {
+            peer: addr_b,
+            request,
+            timeout: Duration::from_secs(5),
+        };
+        let response_rx = client.send_request(client_request).await.unwrap();
 
         // Peer B receives the request
         let mut buf = [0u8; 2048];
         let (n, from) = sock_b.recv_from(&mut buf).await.unwrap();
         assert_eq!(from, addr_a);
         let received = Packet::from_bytes(&buf[..n]).unwrap();
-        assert_eq!(received.get_token(), &[5, 6, 7, 8]);
+        let token = received.get_token().to_vec();
 
         // Peer B sends a NON response with matching token
         let mut response = Packet::new();
         response.header.code = MessageClass::Response(ResponseType::Content);
         response.header.set_type(MessageType::NonConfirmable);
-        response.set_token(vec![5, 6, 7, 8]);
+        response.set_token(token);
         response.payload = b"hello".to_vec();
         sock_b
             .send_to(&response.to_bytes().unwrap(), addr_a)
@@ -406,11 +414,8 @@ mod tests {
             .unwrap();
 
         let resp = response_rx.await.unwrap().unwrap();
-        assert!(matches!(
-            resp.header.code,
-            MessageClass::Response(ResponseType::Content)
-        ));
-        assert_eq!(resp.payload, b"hello");
+        assert_eq!(resp.status(), ResponseType::Content);
+        assert_eq!(resp.payload(), b"hello");
 
         drop(client);
         drop(_server);
@@ -428,25 +433,27 @@ mod tests {
         let (client, _server, stack) = CoapStack::start(endpoint).await.unwrap();
 
         // Client sends a CON request
-        let mut request = Packet::new();
-        request.header.code = MessageClass::Request(RequestType::Get);
-        request.header.set_type(MessageType::Confirmable);
-        request.set_token(vec![10, 11]);
-        let response_rx = client.send_request(request, addr_b).await.unwrap();
+        let request = CoapRequest::new(RequestType::Get).build();
+        let client_request = ClientRequest {
+            peer: addr_b,
+            request,
+            timeout: Duration::from_secs(5),
+        };
+        let response_rx = client.send_request(client_request).await.unwrap();
 
         // Peer B receives the CON request
         let mut buf = [0u8; 2048];
         let (n, _) = sock_b.recv_from(&mut buf).await.unwrap();
         let received = Packet::from_bytes(&buf[..n]).unwrap();
         let request_mid = received.header.message_id;
-        assert_eq!(received.get_token(), &[10, 11]);
+        let token = received.get_token().to_vec();
 
         // Peer B sends a piggybacked response (ACK with response code + same MID)
         let mut response = Packet::new();
         response.header.set_type(MessageType::Acknowledgement);
         response.header.code = MessageClass::Response(ResponseType::Content);
         response.header.message_id = request_mid;
-        response.set_token(vec![10, 11]);
+        response.set_token(token);
         response.payload = b"piggyback".to_vec();
         sock_b
             .send_to(&response.to_bytes().unwrap(), addr_a)
@@ -454,11 +461,8 @@ mod tests {
             .unwrap();
 
         let resp = response_rx.await.unwrap().unwrap();
-        assert!(matches!(
-            resp.header.code,
-            MessageClass::Response(ResponseType::Content)
-        ));
-        assert_eq!(resp.payload, b"piggyback");
+        assert_eq!(resp.status(), ResponseType::Content);
+        assert_eq!(resp.payload(), b"piggyback");
 
         drop(client);
         drop(_server);
@@ -476,17 +480,20 @@ mod tests {
         let (client, _server, stack) = CoapStack::start(endpoint).await.unwrap();
 
         // Client sends a CON request
-        let mut request = Packet::new();
-        request.header.code = MessageClass::Request(RequestType::Get);
-        request.header.set_type(MessageType::Confirmable);
-        request.set_token(vec![20, 21]);
-        let response_rx = client.send_request(request, addr_b).await.unwrap();
+        let request = CoapRequest::new(RequestType::Get).build();
+        let client_request = ClientRequest {
+            peer: addr_b,
+            request,
+            timeout: Duration::from_secs(5),
+        };
+        let response_rx = client.send_request(client_request).await.unwrap();
 
         // Peer B receives the CON request
         let mut buf = [0u8; 2048];
         let (n, _) = sock_b.recv_from(&mut buf).await.unwrap();
         let received = Packet::from_bytes(&buf[..n]).unwrap();
         let request_mid = received.header.message_id;
+        let token = received.get_token().to_vec();
 
         // Peer B sends an empty ACK (acknowledges receipt, response pending)
         let mut ack = Packet::new();
@@ -502,7 +509,7 @@ mod tests {
         let mut response = Packet::new();
         response.header.set_type(MessageType::NonConfirmable);
         response.header.code = MessageClass::Response(ResponseType::Content);
-        response.set_token(vec![20, 21]);
+        response.set_token(token);
         response.payload = b"separate".to_vec();
         sock_b
             .send_to(&response.to_bytes().unwrap(), addr_a)
@@ -510,7 +517,7 @@ mod tests {
             .unwrap();
 
         let resp = response_rx.await.unwrap().unwrap();
-        assert_eq!(resp.payload, b"separate");
+        assert_eq!(resp.payload(), b"separate");
 
         drop(client);
         drop(_server);
@@ -528,11 +535,13 @@ mod tests {
         let (client, _server, stack) = CoapStack::start(endpoint).await.unwrap();
 
         // Client sends a CON request
-        let mut request = Packet::new();
-        request.header.code = MessageClass::Request(RequestType::Get);
-        request.header.set_type(MessageType::Confirmable);
-        request.set_token(vec![30, 31]);
-        let response_rx = client.send_request(request, addr_b).await.unwrap();
+        let request = CoapRequest::new(RequestType::Get).build();
+        let client_request = ClientRequest {
+            peer: addr_b,
+            request,
+            timeout: Duration::from_secs(5),
+        };
+        let response_rx = client.send_request(client_request).await.unwrap();
 
         // Peer B receives the request
         let mut buf = [0u8; 2048];
@@ -589,9 +598,9 @@ mod tests {
         assert!(matches!(ack.header.code, MessageClass::Empty));
 
         // Server should also receive the request
-        let (req, peer) = server.recv_request().await.unwrap();
-        assert_eq!(peer, addr_b);
-        assert_eq!(req.get_token(), &[40, 41]);
+        let req = server.recv_request().await.unwrap();
+        assert_eq!(req.peer, addr_b);
+        assert_eq!(req.token, &[40, 41]);
 
         drop(_client);
         drop(server);
@@ -631,11 +640,11 @@ mod tests {
             .unwrap();
 
         // Should receive only the first and the different one (not the duplicate)
-        let (req1, _) = server.recv_request().await.unwrap();
-        assert_eq!(req1.get_token(), &[50, 51]);
+        let req1 = server.recv_request().await.unwrap();
+        assert_eq!(req1.token, &[50, 51]);
 
-        let (req2, _) = server.recv_request().await.unwrap();
-        assert_eq!(req2.get_token(), &[52, 53]);
+        let req2 = server.recv_request().await.unwrap();
+        assert_eq!(req2.token, &[52, 53]);
 
         drop(_client);
         drop(server);
@@ -653,17 +662,19 @@ mod tests {
         let (client, _server, stack) = CoapStack::start(endpoint).await.unwrap();
 
         // Send two requests — they should get different MIDs
-        let mut req1 = Packet::new();
-        req1.header.code = MessageClass::Request(RequestType::Get);
-        req1.header.set_type(MessageType::NonConfirmable);
-        req1.set_token(vec![60]);
-        let _rx1 = client.send_request(req1, addr_b).await.unwrap();
+        let req1 = CoapRequest::new(RequestType::Get).confirmable(false).build();
+        let _rx1 = client.send_request(ClientRequest {
+            peer: addr_b,
+            request: req1,
+            timeout: Duration::from_secs(5),
+        }).await.unwrap();
 
-        let mut req2 = Packet::new();
-        req2.header.code = MessageClass::Request(RequestType::Get);
-        req2.header.set_type(MessageType::NonConfirmable);
-        req2.set_token(vec![61]);
-        let _rx2 = client.send_request(req2, addr_b).await.unwrap();
+        let req2 = CoapRequest::new(RequestType::Get).confirmable(false).build();
+        let _rx2 = client.send_request(ClientRequest {
+            peer: addr_b,
+            request: req2,
+            timeout: Duration::from_secs(5),
+        }).await.unwrap();
 
         let mut buf = [0u8; 2048];
         let (n1, _) = sock_b.recv_from(&mut buf).await.unwrap();
@@ -692,11 +703,13 @@ mod tests {
         let (client, _server, stack) = CoapStack::start(endpoint).await.unwrap();
 
         // Client sends a CON request — peer never responds
-        let mut request = Packet::new();
-        request.header.code = MessageClass::Request(RequestType::Get);
-        request.header.set_type(MessageType::Confirmable);
-        request.set_token(vec![70, 71]);
-        let response_rx = client.send_request(request, addr_b).await.unwrap();
+        let request = CoapRequest::new(RequestType::Get).build();
+        let client_request = ClientRequest {
+            peer: addr_b,
+            request,
+            timeout: Duration::from_secs(5),
+        };
+        let response_rx = client.send_request(client_request).await.unwrap();
 
         // The exchange should eventually time out
         let result = response_rx.await.unwrap();
@@ -717,11 +730,13 @@ mod tests {
         let (client, _server, stack) = CoapStack::start(endpoint).await.unwrap();
 
         // Client sends a NON request — peer never responds
-        let mut request = Packet::new();
-        request.header.code = MessageClass::Request(RequestType::Get);
-        request.header.set_type(MessageType::NonConfirmable);
-        request.set_token(vec![90, 91]);
-        let response_rx = client.send_request(request, addr_b).await.unwrap();
+        let request = CoapRequest::new(RequestType::Get).confirmable(false).build();
+        let client_request = ClientRequest {
+            peer: addr_b,
+            request,
+            timeout: Duration::from_secs(5),
+        };
+        let response_rx = client.send_request(client_request).await.unwrap();
 
         // The exchange should expire after NON_LIFETIME
         let result = response_rx.await.unwrap();
@@ -763,8 +778,8 @@ mod tests {
         assert_eq!(ack1.header.message_id, 5555);
 
         // Server receives the request
-        let (req, _) = server.recv_request().await.unwrap();
-        assert_eq!(req.get_token(), &[80, 81]);
+        let req = server.recv_request().await.unwrap();
+        assert_eq!(req.token, &[80, 81]);
 
         // Peer B sends the same CON request again (duplicate)
         sock_b.send_to(&request_bytes, addr_a).await.unwrap();
