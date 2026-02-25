@@ -265,7 +265,7 @@ impl CoapStack {
 
                     }
 
-                    // Outbound Response: server wants to send repsonse
+                    // Outbound Response: server wants to send response
                     res = outbound_response_receiver.recv() => {
                         match res {
                             Some(resp) => {
@@ -314,7 +314,7 @@ impl CoapStack {
 
         Ok((
             ClientInterface {
-                outbound_sender: outbound_request_sender.clone(),
+                outbound_sender: outbound_request_sender,
             },
             ServerInterface {
                 outbound_sender: outbound_response_sender,

@@ -43,14 +43,6 @@ impl Exchange {
         }
     }
 
-    // pub fn token(&self) -> &[u8] {
-    //     &self.token
-    // }
-
-    // pub fn peer(&self) -> SocketAddr {
-    //     self.peer
-    // }
-
     pub fn message_id(&self) -> Option<u16> {
         self.message_id
     }
