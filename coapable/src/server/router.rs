@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use coap_lite::{RequestType, ResponseType};
 
 use super::handler::Handler;
+use super::server::RequestContext;
 use crate::message_types::{CoapRequest, CoapResponse};
 
 pub struct MethodRouter {
@@ -42,7 +43,7 @@ impl MethodRouter {
         self
     }
 
-    pub(crate) async fn dispatch(&self, req: CoapRequest) -> CoapResponse {
+    pub(crate) async fn dispatch(&self, req: CoapRequest, ctx: RequestContext) -> CoapResponse {
         let handler = match req.method() {
             RequestType::Get => self.get.as_ref(),
             RequestType::Post => self.post.as_ref(),
@@ -52,7 +53,7 @@ impl MethodRouter {
         };
 
         match handler {
-            Some(h) => h.call(req).await,
+            Some(h) => h.call(req, ctx).await,
             None => CoapResponse::new(ResponseType::MethodNotAllowed).build(),
         }
     }
@@ -146,10 +147,10 @@ impl Router {
         self.merge(nested)
     }
 
-    pub(crate) async fn dispatch(&self, req: CoapRequest) -> CoapResponse {
+    pub(crate) async fn dispatch(&self, req: CoapRequest, ctx: RequestContext) -> CoapResponse {
         let path = req.path();
         match self.routes.get(path) {
-            Some(method_router) => method_router.dispatch(req).await,
+            Some(method_router) => method_router.dispatch(req, ctx).await,
             None => CoapResponse::new(ResponseType::NotFound).build(),
         }
     }
@@ -186,9 +187,15 @@ mod tests {
         CoapRequest::from_packet(&packet).unwrap()
     }
 
+    fn dummy_ctx() -> RequestContext {
+        RequestContext {
+            peer: "127.0.0.1:5683".parse().unwrap(),
+        }
+    }
+
     #[tokio::test]
     async fn routes_get_request() {
-        async fn handle_temp(_req: CoapRequest) -> CoapResponse {
+        async fn handle_temp(_req: CoapRequest, _ctx: RequestContext) -> CoapResponse {
             let mut packet = Packet::new();
             packet.header.code = MessageClass::Response(ResponseType::Content);
             packet.payload = b"22.5".to_vec();
@@ -198,47 +205,47 @@ mod tests {
         let router = Router::new().route("/sensors/temp", get(handle_temp));
 
         let req = make_request(RequestType::Get, "/sensors/temp");
-        let resp = router.dispatch(req).await;
+        let resp = router.dispatch(req, dummy_ctx()).await;
         assert_eq!(resp.status(), ResponseType::Content);
         assert_eq!(resp.payload(), b"22.5");
     }
 
     #[tokio::test]
     async fn returns_not_found_for_unknown_path() {
-        async fn handle(_req: CoapRequest) -> CoapResponse {
+        async fn handle(_req: CoapRequest, _ctx: RequestContext) -> CoapResponse {
             CoapResponse::new(ResponseType::Content).build()
         }
 
         let router = Router::new().route("/known", get(handle));
 
         let req = make_request(RequestType::Get, "/unknown");
-        let resp = router.dispatch(req).await;
+        let resp = router.dispatch(req, dummy_ctx()).await;
         assert_eq!(resp.status(), ResponseType::NotFound);
     }
 
     #[tokio::test]
     async fn returns_method_not_allowed() {
-        async fn handle(_req: CoapRequest) -> CoapResponse {
+        async fn handle(_req: CoapRequest, _ctx: RequestContext) -> CoapResponse {
             CoapResponse::new(ResponseType::Content).build()
         }
 
         let router = Router::new().route("/resource", get(handle));
 
         let req = make_request(RequestType::Post, "/resource");
-        let resp = router.dispatch(req).await;
+        let resp = router.dispatch(req, dummy_ctx()).await;
         assert_eq!(resp.status(), ResponseType::MethodNotAllowed);
     }
 
     #[tokio::test]
     async fn merge_combines_routers() {
-        async fn handle_a(_req: CoapRequest) -> CoapResponse {
+        async fn handle_a(_req: CoapRequest, _ctx: RequestContext) -> CoapResponse {
             let mut packet = Packet::new();
             packet.header.code = MessageClass::Response(ResponseType::Content);
             packet.payload = b"a".to_vec();
             CoapResponse::from_packet(&packet).unwrap()
         }
 
-        async fn handle_b(_req: CoapRequest) -> CoapResponse {
+        async fn handle_b(_req: CoapRequest, _ctx: RequestContext) -> CoapResponse {
             let mut packet = Packet::new();
             packet.header.code = MessageClass::Response(ResponseType::Content);
             packet.payload = b"b".to_vec();
@@ -249,23 +256,23 @@ mod tests {
         let r2 = Router::new().route("/b", get(handle_b));
         let router = r1.merge(r2);
 
-        let resp = router.dispatch(make_request(RequestType::Get, "/a")).await;
+        let resp = router.dispatch(make_request(RequestType::Get, "/a"), dummy_ctx()).await;
         assert_eq!(resp.payload(), b"a");
 
-        let resp = router.dispatch(make_request(RequestType::Get, "/b")).await;
+        let resp = router.dispatch(make_request(RequestType::Get, "/b"), dummy_ctx()).await;
         assert_eq!(resp.payload(), b"b");
     }
 
     #[tokio::test]
     async fn nest_prefixes_routes() {
-        async fn handle_users(_req: CoapRequest) -> CoapResponse {
+        async fn handle_users(_req: CoapRequest, _ctx: RequestContext) -> CoapResponse {
             let mut packet = Packet::new();
             packet.header.code = MessageClass::Response(ResponseType::Content);
             packet.payload = b"users".to_vec();
             CoapResponse::from_packet(&packet).unwrap()
         }
 
-        async fn handle_posts(_req: CoapRequest) -> CoapResponse {
+        async fn handle_posts(_req: CoapRequest, _ctx: RequestContext) -> CoapResponse {
             let mut packet = Packet::new();
             packet.header.code = MessageClass::Response(ResponseType::Content);
             packet.payload = b"posts".to_vec();
@@ -279,31 +286,31 @@ mod tests {
         let router = Router::new().nest("/api/v1", api);
 
         let resp = router
-            .dispatch(make_request(RequestType::Get, "/api/v1/users"))
+            .dispatch(make_request(RequestType::Get, "/api/v1/users"), dummy_ctx())
             .await;
         assert_eq!(resp.payload(), b"users");
 
         let resp = router
-            .dispatch(make_request(RequestType::Get, "/api/v1/posts"))
+            .dispatch(make_request(RequestType::Get, "/api/v1/posts"), dummy_ctx())
             .await;
         assert_eq!(resp.payload(), b"posts");
 
         // original unprefixed path should not match
         let resp = router
-            .dispatch(make_request(RequestType::Get, "/users"))
+            .dispatch(make_request(RequestType::Get, "/users"), dummy_ctx())
             .await;
         assert_eq!(resp.status(), ResponseType::NotFound);
     }
 
     #[tokio::test]
     async fn chains_multiple_methods() {
-        async fn handle_get(_req: CoapRequest) -> CoapResponse {
+        async fn handle_get(_req: CoapRequest, _ctx: RequestContext) -> CoapResponse {
             let mut packet = Packet::new();
             packet.header.code = MessageClass::Response(ResponseType::Content);
             CoapResponse::from_packet(&packet).unwrap()
         }
 
-        async fn handle_post(_req: CoapRequest) -> CoapResponse {
+        async fn handle_post(_req: CoapRequest, _ctx: RequestContext) -> CoapResponse {
             let mut packet = Packet::new();
             packet.header.code = MessageClass::Response(ResponseType::Created);
             CoapResponse::from_packet(&packet).unwrap()
@@ -312,11 +319,11 @@ mod tests {
         let router = Router::new().route("/lights", get(handle_get).post(handle_post));
 
         let req = make_request(RequestType::Get, "/lights");
-        let resp = router.dispatch(req).await;
+        let resp = router.dispatch(req, dummy_ctx()).await;
         assert_eq!(resp.status(), ResponseType::Content);
 
         let req = make_request(RequestType::Post, "/lights");
-        let resp = router.dispatch(req).await;
+        let resp = router.dispatch(req, dummy_ctx()).await;
         assert_eq!(resp.status(), ResponseType::Created);
     }
 }

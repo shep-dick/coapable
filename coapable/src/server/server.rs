@@ -6,6 +6,10 @@ use crate::transport::ServerInterface;
 
 use super::router::Router;
 
+pub struct RequestContext {
+    pub peer: SocketAddr,
+}
+
 pub(crate) struct ServerRequest {
     pub request: CoapRequest,
     pub peer: SocketAddr,
@@ -36,9 +40,9 @@ impl CoapServer {
             };
 
             let token = req.token;
-            let request = req.request;
+            let ctx = RequestContext { peer: req.peer };
 
-            let response = self.router.dispatch(request).await;
+            let response = self.router.dispatch(req.request, ctx).await;
 
             let resp = ServerResponse {
                 response,

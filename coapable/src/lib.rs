@@ -9,7 +9,7 @@ mod transport;
 
 pub use client::{ClientRequestBuilder, CoapClient};
 pub use message_types::{CoapRequest, CoapResponse};
-pub use server::{CoapServer, Router, delete, get, post, put};
+pub use server::{CoapServer, RequestContext, Router, delete, get, post, put};
 pub use transport::ClientInterface;
 pub use transport::CoapEndpoint;
 pub use transport::CoapStack;

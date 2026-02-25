@@ -17,12 +17,6 @@ use super::reliability::IDLE_SESSION_CLEANUP_INTERVAL_SECS;
 use super::session::{AckResult, PeerSession};
 use super::{Result, TransportError};
 
-struct OutboundResponse {
-    response: CoapResponse,
-    peer: SocketAddr,
-    token: Vec<u8>,
-}
-
 struct OutboundRequest {
     request: CoapRequest,
     peer: SocketAddr,
@@ -58,19 +52,15 @@ impl ClientInterface {
 }
 
 pub struct ServerInterface {
-    outbound_sender: mpsc::Sender<OutboundResponse>,
+    outbound_sender: mpsc::Sender<ServerResponse>,
     server_request_receiver: mpsc::Receiver<ServerRequest>,
 }
 
 impl ServerInterface {
     /// Send a CoAP response to a peer (server-side).
-    pub(crate) async fn send_response(&self, server_response: ServerResponse) -> Result<()> {
+    pub(crate) async fn send_response(&self, response: ServerResponse) -> Result<()> {
         self.outbound_sender
-            .send(OutboundResponse {
-                response: server_response.response,
-                peer: server_response.peer,
-                token: server_response.token,
-            })
+            .send(response)
             .await
             .map_err(|_| TransportError::EndpointClosed)?;
         Ok(())
@@ -95,7 +85,7 @@ impl CoapStack {
         mut endpoint: CoapEndpoint,
     ) -> Result<(ClientInterface, ServerInterface, Self)> {
         let (outbound_response_sender, mut outbound_response_receiver) =
-            mpsc::channel::<OutboundResponse>(100);
+            mpsc::channel::<ServerResponse>(100);
         let (server_request_sender, server_request_receiver) = mpsc::channel::<ServerRequest>(100);
         let (outbound_request_sender, mut outbound_request_receiver) =
             mpsc::channel::<OutboundRequest>(100);
@@ -276,7 +266,7 @@ impl CoapStack {
 
                                 let mid = session.allocate_mid();
 
-                                let pkt = resp.response.to_packet(resp.token, mid);
+                                let pkt = resp.response.to_packet(resp.token, mid, MessageType::NonConfirmable);
 
                                 if let Ok(bytes) = pkt.to_bytes() {
                                     endpoint.send_packet(Bytes::from(bytes), resp.peer).await?;

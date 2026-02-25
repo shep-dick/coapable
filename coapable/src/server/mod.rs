@@ -3,7 +3,7 @@ pub mod router;
 pub mod server;
 
 pub use router::{MethodRouter, Router, delete, get, post, put};
-pub use server::CoapServer;
+pub use server::{CoapServer, RequestContext};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ServerError {}
