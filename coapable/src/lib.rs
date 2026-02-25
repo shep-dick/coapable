@@ -4,6 +4,7 @@ use crate::transport::TransportError;
 
 pub mod client;
 pub mod message_types;
+pub mod oscore;
 pub mod server;
 mod transport;
 
