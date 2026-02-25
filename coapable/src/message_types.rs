@@ -1,11 +1,19 @@
 use std::time::Duration;
 
-use coap_lite::{ContentFormat, MessageClass, Packet, RequestType, ResponseType};
+use coap_lite::{
+    CoapOption, ContentFormat, MessageClass, Packet, RequestType, ResponseType,
+    option_value::OptionValueU16,
+};
+
+type Result<T> = std::result::Result<T, MessageError>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum MessageError {
     #[error("packet is not a response")]
     NotAResponse,
+
+    #[error("invalid URI path")]
+    InvalidUriPath,
 }
 
 pub struct CoapResponseBuilder {
@@ -58,7 +66,7 @@ impl CoapResponse {
         CoapResponseBuilder::new(response_type, token)
     }
 
-    pub fn from_packet(packet: &Packet) -> Result<Self, MessageError> {
+    pub fn from_packet(packet: &Packet) -> Result<Self> {
         let response_type = match packet.header.code {
             MessageClass::Response(code) => Ok(code),
             _ => Err(MessageError::NotAResponse),
@@ -209,5 +217,41 @@ impl CoapRequest {
 
     pub fn confirmable(&self) -> bool {
         self.confirmable
+    }
+
+    pub fn to_packet(self, token: Vec<u8>, mid: u16) -> Result<Packet> {
+        let mut pkt = Packet::new();
+
+        pkt.set_token(token);
+        pkt.header.message_id = mid;
+
+        pkt.header.code = MessageClass::Request(self.method);
+
+        if self.path.as_bytes() != [] {
+            for segment in self.path.split('/').filter(|s| !s.is_empty()) {
+                pkt.add_option(CoapOption::UriPath, segment.as_bytes().to_vec());
+            }
+        } else {
+            return Err(MessageError::InvalidUriPath);
+        }
+
+        for query in &self.queries {
+            pkt.add_option(CoapOption::UriQuery, query.as_bytes().to_vec());
+        }
+
+        if let Some(cf) = self.content_format {
+            pkt.set_content_format(cf);
+        }
+
+        if let Some(cf) = self.accept {
+            let value = usize::from(cf) as u16;
+            pkt.add_option_as(CoapOption::Accept, OptionValueU16(value));
+        }
+
+        if self.payload.as_slice() != [] {
+            pkt.payload = self.payload
+        }
+
+        Ok(pkt)
     }
 }
