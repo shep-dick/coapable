@@ -2,13 +2,10 @@ use std::net::SocketAddr;
 
 use crate::CoapResponse;
 use crate::message_types::CoapRequest;
+use crate::server::handler::RequestHandler;
 use crate::transport::ServerInterface;
 
 use super::router::Router;
-
-pub struct RequestContext {
-    pub peer: SocketAddr,
-}
 
 pub(crate) struct ServerRequest {
     pub request: CoapRequest,
@@ -22,13 +19,13 @@ pub(crate) struct ServerResponse {
     pub token: Vec<u8>,
 }
 
-pub struct CoapServer {
+pub struct CoapServer<S: Send + Sync + 'static> {
     interface: ServerInterface,
-    router: Router,
+    router: Router<S>,
 }
 
-impl CoapServer {
-    pub fn new(interface: ServerInterface, router: Router) -> Self {
+impl<S: Send + Sync + 'static> CoapServer<S> {
+    pub fn new(interface: ServerInterface, router: Router<S>) -> Self {
         Self { interface, router }
     }
 
@@ -40,17 +37,16 @@ impl CoapServer {
             };
 
             let token = req.token;
-            let ctx = RequestContext { peer: req.peer };
+            let peer = req.peer;
 
-            let response = self.router.dispatch(req.request, ctx).await;
-
-            let resp = ServerResponse {
-                response,
-                peer: req.peer,
-                token,
-            };
-
-            let _ = self.interface.send_response(resp).await;
+            if let Some(response) = self.router.handle(req.request, peer).await {
+                let resp = ServerResponse {
+                    response,
+                    peer,
+                    token,
+                };
+                let _ = self.interface.send_response(resp).await;
+            }
         }
     }
 }

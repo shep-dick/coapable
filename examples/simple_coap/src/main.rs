@@ -1,7 +1,8 @@
+use std::sync::Arc;
+
 use coap_lite::{ContentFormat, ResponseType};
 use coapable::{
-    CoapClient, CoapEndpoint, CoapRequest, CoapResponse, CoapServer, CoapStack, RequestContext,
-    Router, get,
+    CoapClient, CoapEndpoint, CoapResponse, CoapServer, CoapStack, HandlerRequest, Router, get,
 };
 use tokio::net::UdpSocket;
 
@@ -13,7 +14,7 @@ async fn main() {
 
     let client = CoapClient::new(client_if);
 
-    let router = Router::new().route("/info", get(get_info));
+    let router = Router::new(Arc::new(())).route("/info", get(get_info));
     let server = CoapServer::new(server_if, router);
 
     tokio::spawn(server.run());
@@ -30,7 +31,7 @@ async fn main() {
     println!("    Payload: {:?}", response.payload());
 }
 
-async fn get_info(_: CoapRequest, _: RequestContext) -> CoapResponse {
+async fn get_info(_: HandlerRequest, _: Arc<()>) -> CoapResponse {
     CoapResponse::new(ResponseType::Content)
         .content_format(ContentFormat::TextPlain)
         .payload(b"response")

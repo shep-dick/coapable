@@ -2,8 +2,9 @@ mod handler;
 pub mod router;
 pub mod server;
 
+pub use handler::{HandlerRequest, RequestContext};
 pub use router::{MethodRouter, Router, delete, get, post, put};
-pub use server::{CoapServer, RequestContext};
+pub use server::CoapServer;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ServerError {}

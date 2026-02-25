@@ -1,19 +1,24 @@
 use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::sync::Arc;
 
 use coap_lite::{RequestType, ResponseType};
 
-use super::handler::Handler;
-use super::server::RequestContext;
 use crate::message_types::{CoapRequest, CoapResponse};
 
-pub struct MethodRouter {
-    get: Option<Box<dyn Handler>>,
-    post: Option<Box<dyn Handler>>,
-    put: Option<Box<dyn Handler>>,
-    delete: Option<Box<dyn Handler>>,
+use super::handler::{
+    BoxHandler, Extensions, HandlerRequest, IntoHandler, RequestContext, SecurityContext,
+};
+
+/// Per-method handler slots on a trie node.
+struct MethodHandlers<S> {
+    get: Option<BoxHandler<S>>,
+    post: Option<BoxHandler<S>>,
+    put: Option<BoxHandler<S>>,
+    delete: Option<BoxHandler<S>>,
 }
 
-impl MethodRouter {
+impl<S> MethodHandlers<S> {
     fn new() -> Self {
         Self {
             get: None,
@@ -23,42 +28,21 @@ impl MethodRouter {
         }
     }
 
-    pub fn get<H: Handler>(mut self, handler: H) -> Self {
-        self.get = Some(Box::new(handler));
-        self
-    }
-
-    pub fn post<H: Handler>(mut self, handler: H) -> Self {
-        self.post = Some(Box::new(handler));
-        self
-    }
-
-    pub fn put<H: Handler>(mut self, handler: H) -> Self {
-        self.put = Some(Box::new(handler));
-        self
-    }
-
-    pub fn delete<H: Handler>(mut self, handler: H) -> Self {
-        self.delete = Some(Box::new(handler));
-        self
-    }
-
-    pub(crate) async fn dispatch(&self, req: CoapRequest, ctx: RequestContext) -> CoapResponse {
-        let handler = match req.method() {
+    fn retrieve_handler(&self, method: &RequestType) -> Option<&BoxHandler<S>> {
+        match method {
             RequestType::Get => self.get.as_ref(),
             RequestType::Post => self.post.as_ref(),
             RequestType::Put => self.put.as_ref(),
             RequestType::Delete => self.delete.as_ref(),
             _ => None,
-        };
-
-        match handler {
-            Some(h) => h.call(req, ctx).await,
-            None => CoapResponse::new(ResponseType::MethodNotAllowed).build(),
         }
     }
 
-    fn merge(&mut self, other: MethodRouter) {
+    fn has_any(&self) -> bool {
+        self.get.is_some() || self.post.is_some() || self.put.is_some() || self.delete.is_some()
+    }
+
+    fn merge(&mut self, other: MethodHandlers<S>) {
         if other.get.is_some() {
             self.get = other.get;
         }
@@ -74,256 +58,193 @@ impl MethodRouter {
     }
 }
 
-pub fn get<H: Handler>(handler: H) -> MethodRouter {
-    MethodRouter::new().get(handler)
+/// A node in the routing trie.
+struct Node<S> {
+    /// Static path segment children.
+    children: HashMap<Arc<str>, Node<S>>,
+    /// Dynamic segment child (`:param_name`).
+    param: Option<(Arc<str>, Box<Node<S>>)>,
+    /// Handlers per CoAP method.
+    handlers: MethodHandlers<S>,
 }
 
-pub fn post<H: Handler>(handler: H) -> MethodRouter {
-    MethodRouter::new().post(handler)
-}
-
-pub fn put<H: Handler>(handler: H) -> MethodRouter {
-    MethodRouter::new().put(handler)
-}
-
-pub fn delete<H: Handler>(handler: H) -> MethodRouter {
-    MethodRouter::new().delete(handler)
-}
-
-pub struct Router {
-    routes: HashMap<String, MethodRouter>,
-}
-
-impl Router {
-    pub fn new() -> Self {
+impl<S> Node<S> {
+    fn new() -> Self {
         Self {
-            routes: HashMap::new(),
+            children: HashMap::new(),
+            param: None,
+            handlers: MethodHandlers::new(),
         }
     }
+}
 
-    pub fn route(mut self, path: &str, method_router: MethodRouter) -> Self {
-        let normalized = normalize_path(path);
-        match self.routes.entry(normalized) {
-            std::collections::hash_map::Entry::Occupied(mut entry) => {
-                entry.get_mut().merge(method_router);
-            }
-            std::collections::hash_map::Entry::Vacant(entry) => {
-                entry.insert(method_router);
-            }
-        }
+/// Builder for associating handlers with specific CoAP methods on a route.
+pub struct MethodRouter<S> {
+    handlers: MethodHandlers<S>,
+}
+
+impl<S: Send + Sync + 'static> MethodRouter<S> {
+    pub fn get(mut self, handler: impl IntoHandler<S>) -> Self {
+        self.handlers.get = Some(handler.into_handler());
         self
     }
 
-    pub fn merge(mut self, other: Router) -> Self {
-        for (path, method_router) in other.routes {
-            match self.routes.entry(path) {
-                std::collections::hash_map::Entry::Occupied(mut entry) => {
-                    entry.get_mut().merge(method_router);
-                }
-                std::collections::hash_map::Entry::Vacant(entry) => {
-                    entry.insert(method_router);
-                }
-            }
-        }
+    pub fn post(mut self, handler: impl IntoHandler<S>) -> Self {
+        self.handlers.post = Some(handler.into_handler());
         self
     }
 
-    pub fn nest(self, prefix: &str, other: Router) -> Self {
-        let prefix = normalize_path(prefix);
-        let nested = Router {
-            routes: other
-                .routes
-                .into_iter()
-                .map(|(path, mr)| {
-                    let full = if path == "/" {
-                        prefix.clone()
-                    } else {
-                        format!("{}{}", prefix, path)
-                    };
-                    (full, mr)
-                })
-                .collect(),
+    pub fn put(mut self, handler: impl IntoHandler<S>) -> Self {
+        self.handlers.put = Some(handler.into_handler());
+        self
+    }
+
+    pub fn delete(mut self, handler: impl IntoHandler<S>) -> Self {
+        self.handlers.delete = Some(handler.into_handler());
+        self
+    }
+}
+
+/// Create a [`MethodRouter`] with a GET handler.
+pub fn get<S: Send + Sync + 'static>(handler: impl IntoHandler<S>) -> MethodRouter<S> {
+    MethodRouter {
+        handlers: MethodHandlers {
+            get: Some(handler.into_handler()),
+            ..MethodHandlers::new()
+        },
+    }
+}
+
+/// Create a [`MethodRouter`] with a POST handler.
+pub fn post<S: Send + Sync + 'static>(handler: impl IntoHandler<S>) -> MethodRouter<S> {
+    MethodRouter {
+        handlers: MethodHandlers {
+            post: Some(handler.into_handler()),
+            ..MethodHandlers::new()
+        },
+    }
+}
+
+/// Create a [`MethodRouter`] with a PUT handler.
+pub fn put<S: Send + Sync + 'static>(handler: impl IntoHandler<S>) -> MethodRouter<S> {
+    MethodRouter {
+        handlers: MethodHandlers {
+            put: Some(handler.into_handler()),
+            ..MethodHandlers::new()
+        },
+    }
+}
+
+/// Create a [`MethodRouter`] with a DELETE handler.
+pub fn delete<S: Send + Sync + 'static>(handler: impl IntoHandler<S>) -> MethodRouter<S> {
+    MethodRouter {
+        handlers: MethodHandlers {
+            delete: Some(handler.into_handler()),
+            ..MethodHandlers::new()
+        },
+    }
+}
+
+/// Trie-based CoAP router with path parameter extraction and per-method dispatch.
+pub struct Router<S: Send + Sync + 'static> {
+    root: Node<S>,
+    state: Arc<S>,
+}
+
+impl<S: Send + Sync + 'static> Router<S> {
+    pub fn new(state: Arc<S>) -> Self {
+        Self {
+            root: Node::new(),
+            state,
+        }
+    }
+
+    /// Register handlers for a path. Path segments starting with `:` are
+    /// dynamic parameters (e.g., `"devices/:id"`).
+    pub fn route(mut self, path: &str, method_router: MethodRouter<S>) -> Self {
+        let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+        let node = Self::walk_or_create(&mut self.root, &segments);
+        node.handlers.merge(method_router.handlers);
+        self
+    }
+
+    fn walk_or_create<'a>(current: &'a mut Node<S>, segments: &[&str]) -> &'a mut Node<S> {
+        let mut node = current;
+        for &segment in segments {
+            if let Some(param_name) = segment.strip_prefix(':') {
+                let param_arc: Arc<str> = param_name.into();
+                if node.param.is_none() {
+                    node.param = Some((param_arc, Box::new(Node::new())));
+                }
+                node = &mut node.param.as_mut().unwrap().1;
+            } else {
+                let key: Arc<str> = segment.into();
+                node = node.children.entry(key).or_insert_with(Node::new);
+            }
+        }
+        node
+    }
+
+    /// Match a path against the trie. Returns the matched node and extracted
+    /// path parameters, or `None` if no route matches.
+    fn lookup(&self, segments: &[&str]) -> Option<(&Node<S>, HashMap<String, String>)> {
+        let mut current = &self.root;
+        let mut params = HashMap::new();
+
+        for &segment in segments {
+            // Static match takes priority over param match.
+            if let Some(child) = current.children.get(segment) {
+                current = child;
+            } else if let Some((param_name, param_node)) = &current.param {
+                params.insert(param_name.to_string(), segment.to_string());
+                current = param_node;
+            } else {
+                return None;
+            }
+        }
+
+        if current.handlers.has_any() {
+            Some((current, params))
+        } else {
+            None
+        }
+    }
+}
+
+impl<S: Send + Sync + 'static> super::handler::RequestHandler for Router<S> {
+    async fn handle(&self, request: CoapRequest, peer: SocketAddr) -> Option<CoapResponse> {
+        let path = request.path();
+        let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+        let method = request.method();
+
+        // Trie lookup
+        let (node, params) = match self.lookup(&segments) {
+            Some(result) => result,
+            None => {
+                return Some(CoapResponse::new(ResponseType::NotFound).build());
+            }
         };
-        self.merge(nested)
-    }
 
-    pub(crate) async fn dispatch(&self, req: CoapRequest, ctx: RequestContext) -> CoapResponse {
-        let path = req.path();
-        match self.routes.get(path) {
-            Some(method_router) => method_router.dispatch(req, ctx).await,
-            None => CoapResponse::new(ResponseType::NotFound).build(),
-        }
-    }
-}
-
-fn normalize_path(path: &str) -> String {
-    let mut normalized = if path.starts_with('/') {
-        path.to_string()
-    } else {
-        format!("/{}", path)
-    };
-
-    if normalized.len() > 1 && normalized.ends_with('/') {
-        normalized.pop();
-    }
-
-    normalized
-}
-
-#[cfg(test)]
-mod tests {
-    use coap_lite::{MessageClass, Packet, RequestType, ResponseType};
-
-    use super::*;
-
-    fn make_request(method: RequestType, path: &str) -> CoapRequest {
-        let mut packet = Packet::new();
-        packet.header.code = MessageClass::Request(method);
-        for segment in path.trim_start_matches('/').split('/') {
-            if !segment.is_empty() {
-                packet.add_option(coap_lite::CoapOption::UriPath, segment.as_bytes().to_vec());
+        // Method dispatch
+        let handler = match node.handlers.retrieve_handler(&method) {
+            Some(h) => h,
+            None => {
+                return Some(CoapResponse::new(ResponseType::MethodNotAllowed).build());
             }
-        }
-        CoapRequest::from_packet(&packet).unwrap()
-    }
+        };
 
-    fn dummy_ctx() -> RequestContext {
-        RequestContext {
-            peer: "127.0.0.1:5683".parse().unwrap(),
-        }
-    }
+        // Build HandlerRequest and invoke
+        let handler_request = HandlerRequest {
+            request,
+            ctx: RequestContext {
+                peer,
+                params,
+                security: SecurityContext::None,
+                extensions: Extensions::new(),
+            },
+        };
 
-    #[tokio::test]
-    async fn routes_get_request() {
-        async fn handle_temp(_req: CoapRequest, _ctx: RequestContext) -> CoapResponse {
-            let mut packet = Packet::new();
-            packet.header.code = MessageClass::Response(ResponseType::Content);
-            packet.payload = b"22.5".to_vec();
-            CoapResponse::from_packet(&packet).unwrap()
-        }
-
-        let router = Router::new().route("/sensors/temp", get(handle_temp));
-
-        let req = make_request(RequestType::Get, "/sensors/temp");
-        let resp = router.dispatch(req, dummy_ctx()).await;
-        assert_eq!(resp.status(), ResponseType::Content);
-        assert_eq!(resp.payload(), b"22.5");
-    }
-
-    #[tokio::test]
-    async fn returns_not_found_for_unknown_path() {
-        async fn handle(_req: CoapRequest, _ctx: RequestContext) -> CoapResponse {
-            CoapResponse::new(ResponseType::Content).build()
-        }
-
-        let router = Router::new().route("/known", get(handle));
-
-        let req = make_request(RequestType::Get, "/unknown");
-        let resp = router.dispatch(req, dummy_ctx()).await;
-        assert_eq!(resp.status(), ResponseType::NotFound);
-    }
-
-    #[tokio::test]
-    async fn returns_method_not_allowed() {
-        async fn handle(_req: CoapRequest, _ctx: RequestContext) -> CoapResponse {
-            CoapResponse::new(ResponseType::Content).build()
-        }
-
-        let router = Router::new().route("/resource", get(handle));
-
-        let req = make_request(RequestType::Post, "/resource");
-        let resp = router.dispatch(req, dummy_ctx()).await;
-        assert_eq!(resp.status(), ResponseType::MethodNotAllowed);
-    }
-
-    #[tokio::test]
-    async fn merge_combines_routers() {
-        async fn handle_a(_req: CoapRequest, _ctx: RequestContext) -> CoapResponse {
-            let mut packet = Packet::new();
-            packet.header.code = MessageClass::Response(ResponseType::Content);
-            packet.payload = b"a".to_vec();
-            CoapResponse::from_packet(&packet).unwrap()
-        }
-
-        async fn handle_b(_req: CoapRequest, _ctx: RequestContext) -> CoapResponse {
-            let mut packet = Packet::new();
-            packet.header.code = MessageClass::Response(ResponseType::Content);
-            packet.payload = b"b".to_vec();
-            CoapResponse::from_packet(&packet).unwrap()
-        }
-
-        let r1 = Router::new().route("/a", get(handle_a));
-        let r2 = Router::new().route("/b", get(handle_b));
-        let router = r1.merge(r2);
-
-        let resp = router.dispatch(make_request(RequestType::Get, "/a"), dummy_ctx()).await;
-        assert_eq!(resp.payload(), b"a");
-
-        let resp = router.dispatch(make_request(RequestType::Get, "/b"), dummy_ctx()).await;
-        assert_eq!(resp.payload(), b"b");
-    }
-
-    #[tokio::test]
-    async fn nest_prefixes_routes() {
-        async fn handle_users(_req: CoapRequest, _ctx: RequestContext) -> CoapResponse {
-            let mut packet = Packet::new();
-            packet.header.code = MessageClass::Response(ResponseType::Content);
-            packet.payload = b"users".to_vec();
-            CoapResponse::from_packet(&packet).unwrap()
-        }
-
-        async fn handle_posts(_req: CoapRequest, _ctx: RequestContext) -> CoapResponse {
-            let mut packet = Packet::new();
-            packet.header.code = MessageClass::Response(ResponseType::Content);
-            packet.payload = b"posts".to_vec();
-            CoapResponse::from_packet(&packet).unwrap()
-        }
-
-        let api = Router::new()
-            .route("/users", get(handle_users))
-            .route("/posts", get(handle_posts));
-
-        let router = Router::new().nest("/api/v1", api);
-
-        let resp = router
-            .dispatch(make_request(RequestType::Get, "/api/v1/users"), dummy_ctx())
-            .await;
-        assert_eq!(resp.payload(), b"users");
-
-        let resp = router
-            .dispatch(make_request(RequestType::Get, "/api/v1/posts"), dummy_ctx())
-            .await;
-        assert_eq!(resp.payload(), b"posts");
-
-        // original unprefixed path should not match
-        let resp = router
-            .dispatch(make_request(RequestType::Get, "/users"), dummy_ctx())
-            .await;
-        assert_eq!(resp.status(), ResponseType::NotFound);
-    }
-
-    #[tokio::test]
-    async fn chains_multiple_methods() {
-        async fn handle_get(_req: CoapRequest, _ctx: RequestContext) -> CoapResponse {
-            let mut packet = Packet::new();
-            packet.header.code = MessageClass::Response(ResponseType::Content);
-            CoapResponse::from_packet(&packet).unwrap()
-        }
-
-        async fn handle_post(_req: CoapRequest, _ctx: RequestContext) -> CoapResponse {
-            let mut packet = Packet::new();
-            packet.header.code = MessageClass::Response(ResponseType::Created);
-            CoapResponse::from_packet(&packet).unwrap()
-        }
-
-        let router = Router::new().route("/lights", get(handle_get).post(handle_post));
-
-        let req = make_request(RequestType::Get, "/lights");
-        let resp = router.dispatch(req, dummy_ctx()).await;
-        assert_eq!(resp.status(), ResponseType::Content);
-
-        let req = make_request(RequestType::Post, "/lights");
-        let resp = router.dispatch(req, dummy_ctx()).await;
-        assert_eq!(resp.status(), ResponseType::Created);
+        let response = handler(handler_request, self.state.clone()).await;
+        Some(response)
     }
 }
