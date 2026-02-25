@@ -1,5 +1,6 @@
-use std::net::SocketAddr;
+use std::{net::SocketAddr, str::FromStr};
 
+use bytes::Bytes;
 use coap_lite::{
     CoapOption, ContentFormat, MessageClass, MessageType, Packet, RequestType, ResponseType,
 };
@@ -10,155 +11,186 @@ pub enum MessageError {
     NotAResponse,
 }
 
+pub struct CoapResponseBuilder {
+    response_type: ResponseType,
+    token: Vec<u8>,
+    content_format: Option<ContentFormat>,
+    payload: Vec<u8>,
+}
+
+impl CoapResponseBuilder {
+    pub fn new(response_type: ResponseType, token: Vec<u8>) -> Self {
+        Self {
+            response_type,
+            token,
+            content_format: None,
+            payload: Vec::new(),
+        }
+    }
+
+    pub fn content_format(&mut self, content_format: ContentFormat) -> &Self {
+        self.content_format = Some(content_format);
+        self
+    }
+
+    pub fn payload(&mut self, payload: &[u8]) -> &Self {
+        self.payload.clone_from_slice(payload);
+        self
+    }
+
+    pub fn build(self) -> CoapResponse {
+        CoapResponse {
+            response_type: self.response_type,
+            token: self.token,
+            content_format: self.content_format,
+            payload: self.payload,
+        }
+    }
+}
+
 /// A CoAP response received from a peer.
 pub struct CoapResponse {
-    packet: Packet,
+    response_type: ResponseType,
+    token: Vec<u8>,
+    content_format: Option<ContentFormat>,
+    payload: Vec<u8>,
 }
 
 impl CoapResponse {
     // Constructor
-    pub fn new() -> Self {
-        Self {
-            packet: Packet::new(),
-        }
-    }
-
-    // Builder functions
-    pub fn message_code(mut self, code: MessageClass) -> Self {
-        self.packet.header.set_code(&code.to_string());
-        self
+    pub fn new(response_type: ResponseType, token: Vec<u8>) -> CoapResponseBuilder {
+        CoapResponseBuilder::new(response_type, token)
     }
 
     // From raw packet constructor
-    pub fn from_packet(packet: Packet) -> Result<Self, MessageError> {
-        match packet.header.code {
-            MessageClass::Response(_) => Ok(Self { packet }),
+    pub fn from_packet(packet: &Packet) -> Result<Self, MessageError> {
+        let response_type = match packet.header.code {
+            MessageClass::Response(code) => Ok(code),
             _ => Err(MessageError::NotAResponse),
-        }
-    }
+        }?;
 
-    pub fn not_found() -> Self {
-        let mut packet = Packet::new();
-        packet
-            .header
-            .set_code(&MessageClass::Response(ResponseType::NotFound).to_string());
-        Self { packet }
-    }
+        let token = packet.get_token().to_vec();
 
-    pub fn method_not_allowed() -> Self {
-        let mut packet = Packet::new();
-        packet
-            .header
-            .set_code(&MessageClass::Response(ResponseType::MethodNotAllowed).to_string());
-        Self { packet }
-    }
+        let content_format = packet.get_content_format();
 
-    pub fn not_implemented() -> Self {
-        let mut packet = Packet::new();
-        packet
-            .header
-            .set_code(&MessageClass::Response(ResponseType::NotImplemented).to_string());
-        Self { packet }
+        let payload = packet.payload.to_owned();
+
+        Ok(Self {
+            response_type,
+            token,
+            content_format,
+            payload,
+        })
     }
 
     /// Returns the response status code.
     pub fn status(&self) -> ResponseType {
-        match self.packet.header.code {
-            MessageClass::Response(code) => code,
-            _ => unreachable!("non-response packet in CoapResponse"),
-        }
+        self.response_type
     }
 
-    /// Returns the response payload as bytes.
+    /// Returns the response payload as a slice.
     pub fn payload(&self) -> &[u8] {
-        &self.packet.payload
+        &self.payload
     }
 
     /// Returns the payload as a UTF-8 string, if valid.
     pub fn payload_string(&self) -> Option<&str> {
-        std::str::from_utf8(&self.packet.payload).ok()
+        std::str::from_utf8(&self.payload).ok()
     }
 
     /// Returns the Content-Format of the response, if present.
     pub fn content_format(&self) -> Option<ContentFormat> {
-        self.packet.get_content_format()
+        self.content_format
+    }
+}
+
+pub struct CoapRequestBuilder {
+    method: RequestType,
+    path: String,
+    queries: Vec<String>,
+    content_format: Option<ContentFormat>,
+    payload: Vec<u8>,
+}
+
+impl CoapRequestBuilder {
+    pub fn new(method: RequestType) -> Self {
+        Self {
+            method,
+            path: String::new(),
+            queries: Vec::new(),
+            content_format: None,
+            payload: Vec::new(),
+        }
     }
 
-    /// Consumes the response and returns the underlying packet.
-    pub fn into_packet(self) -> Packet {
-        self.packet
+    pub fn path(&mut self, path: &str) -> &Self {
+        self.path.push_str(path);
+        self
+    }
+
+    pub fn query(&mut self, query: &str) -> &Self {
+        self.queries.push(query.to_string());
+        self
+    }
+
+    pub fn content_format(&mut self, content_format: ContentFormat) -> &Self {
+        self.content_format = Some(content_format);
+        self
+    }
+
+    pub fn payload(&mut self, payload: &[u8]) -> &Self {
+        self.payload.clone_from_slice(payload);
+        self
+    }
+
+    pub fn build(self) -> CoapRequest {
+        CoapRequest {
+            method: self.method,
+            path: self.path,
+            queries: self.queries,
+            content_format: self.content_format,
+            payload: self.payload,
+        }
     }
 }
 
 pub struct CoapRequest {
-    packet: Packet,
-    peer: SocketAddr,
+    method: RequestType,
+    path: String,
+    queries: Vec<String>,
+    content_format: Option<ContentFormat>,
+    payload: Vec<u8>,
 }
 
 impl CoapRequest {
-    pub fn from_raw(packet: Packet, peer: SocketAddr) -> Self {
-        Self { packet, peer }
+    pub fn new(method: RequestType) -> CoapRequestBuilder {
+        CoapRequestBuilder::new(method)
     }
 
     pub fn method(&self) -> RequestType {
-        match self.packet.header.code {
-            MessageClass::Request(m) => m,
-            _ => RequestType::UnKnown,
-        }
+        self.method
     }
 
-    /// Reconstructs the URI path from Uri-Path options.
-    /// e.g. segments ["sensors", "temp"] → "/sensors/temp"
-    pub fn path(&self) -> String {
-        match self.packet.get_option(CoapOption::UriPath) {
-            Some(segments) => {
-                let mut path = String::new();
-                for seg in segments {
-                    path.push('/');
-                    path.push_str(&String::from_utf8_lossy(seg));
-                }
-                if path.is_empty() {
-                    "/".to_string()
-                } else {
-                    path
-                }
-            }
-            None => "/".to_string(),
-        }
+    pub fn path(&self) -> &str {
+        &self.path
     }
 
-    pub fn queries(&self) -> Vec<String> {
-        self.packet
-            .get_option(CoapOption::UriQuery)
-            .map(|qs| {
-                qs.iter()
-                    .map(|q| String::from_utf8_lossy(q).into_owned())
-                    .collect()
-            })
-            .unwrap_or_default()
+    pub fn queries(&self) -> Option<&Vec<String>> {
+        match self.queries.as_slice() {
+            [] => None,
+            _ => Some(&self.queries),
+        }
     }
 
     pub fn payload(&self) -> &[u8] {
-        &self.packet.payload
+        &self.payload
     }
 
     pub fn payload_string(&self) -> Option<&str> {
-        std::str::from_utf8(&self.packet.payload).ok()
+        std::str::from_utf8(&self.payload).ok()
     }
 
     pub fn content_format(&self) -> Option<ContentFormat> {
-        self.packet.get_content_format()
-    }
-
-    pub fn peer(&self) -> SocketAddr {
-        self.peer
-    }
-
-    pub fn packet(&self) -> &Packet {
-        &self.packet
-    }
-
-    pub fn into_packet(self) -> Packet {
-        self.packet
+        self.content_format
     }
 }

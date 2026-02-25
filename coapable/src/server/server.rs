@@ -1,4 +1,4 @@
-use coap_lite::{ContentFormat, MessageType};
+use coap_lite::MessageType;
 
 use crate::message_types::CoapRequest;
 use crate::transport::ServerInterface;
@@ -34,13 +34,4 @@ impl CoapServer {
             let _ = self.interface.send_response(response_packet, peer).await;
         }
     }
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct ResourceMetadata {
-    pub path: String,
-    pub resource_type: Option<String>,
-    pub interface: Option<String>,
-    pub content_format: Option<ContentFormat>,
-    pub observable: bool,
 }
