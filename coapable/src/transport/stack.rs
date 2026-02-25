@@ -64,7 +64,7 @@ pub struct ServerInterface {
 
 impl ServerInterface {
     /// Send a CoAP response to a peer (server-side).
-    pub async fn send_response(&self, server_response: ServerResponse) -> Result<()> {
+    pub(crate) async fn send_response(&self, server_response: ServerResponse) -> Result<()> {
         self.outbound_sender
             .send(OutboundResponse {
                 response: server_response.response,
@@ -77,7 +77,7 @@ impl ServerInterface {
     }
 
     /// Receive the next inbound CoAP request (server-side).
-    pub async fn recv_request(&mut self) -> Result<ServerRequest> {
+    pub(crate) async fn recv_request(&mut self) -> Result<ServerRequest> {
         self.server_request_receiver
             .recv()
             .await
@@ -246,15 +246,13 @@ impl CoapStack {
 
                                 let exchange = if is_con {
                                     Exchange::new_con(
-                                        token.clone(),
-                                        req.peer,
                                         req.response_tx,
                                         mid,
                                         bytes.clone(),
                                         Instant::now(),
                                     )
                                 } else {
-                                    Exchange::new_non(token.clone(), req.peer, req.response_tx, Instant::now())
+                                    Exchange::new_non(req.response_tx, Instant::now())
                                 };
 
                                 if is_con {
@@ -391,7 +389,6 @@ mod tests {
         let client_request = ClientRequest {
             peer: addr_b,
             request,
-            timeout: Duration::from_secs(5),
         };
         let response_rx = client.send_request(client_request).await.unwrap();
 
@@ -437,7 +434,6 @@ mod tests {
         let client_request = ClientRequest {
             peer: addr_b,
             request,
-            timeout: Duration::from_secs(5),
         };
         let response_rx = client.send_request(client_request).await.unwrap();
 
@@ -484,7 +480,6 @@ mod tests {
         let client_request = ClientRequest {
             peer: addr_b,
             request,
-            timeout: Duration::from_secs(5),
         };
         let response_rx = client.send_request(client_request).await.unwrap();
 
@@ -539,7 +534,6 @@ mod tests {
         let client_request = ClientRequest {
             peer: addr_b,
             request,
-            timeout: Duration::from_secs(5),
         };
         let response_rx = client.send_request(client_request).await.unwrap();
 
@@ -662,19 +656,27 @@ mod tests {
         let (client, _server, stack) = CoapStack::start(endpoint).await.unwrap();
 
         // Send two requests — they should get different MIDs
-        let req1 = CoapRequest::new(RequestType::Get).confirmable(false).build();
-        let _rx1 = client.send_request(ClientRequest {
-            peer: addr_b,
-            request: req1,
-            timeout: Duration::from_secs(5),
-        }).await.unwrap();
+        let req1 = CoapRequest::new(RequestType::Get)
+            .confirmable(false)
+            .build();
+        let _rx1 = client
+            .send_request(ClientRequest {
+                peer: addr_b,
+                request: req1,
+            })
+            .await
+            .unwrap();
 
-        let req2 = CoapRequest::new(RequestType::Get).confirmable(false).build();
-        let _rx2 = client.send_request(ClientRequest {
-            peer: addr_b,
-            request: req2,
-            timeout: Duration::from_secs(5),
-        }).await.unwrap();
+        let req2 = CoapRequest::new(RequestType::Get)
+            .confirmable(false)
+            .build();
+        let _rx2 = client
+            .send_request(ClientRequest {
+                peer: addr_b,
+                request: req2,
+            })
+            .await
+            .unwrap();
 
         let mut buf = [0u8; 2048];
         let (n1, _) = sock_b.recv_from(&mut buf).await.unwrap();
@@ -707,7 +709,6 @@ mod tests {
         let client_request = ClientRequest {
             peer: addr_b,
             request,
-            timeout: Duration::from_secs(5),
         };
         let response_rx = client.send_request(client_request).await.unwrap();
 
@@ -730,11 +731,12 @@ mod tests {
         let (client, _server, stack) = CoapStack::start(endpoint).await.unwrap();
 
         // Client sends a NON request — peer never responds
-        let request = CoapRequest::new(RequestType::Get).confirmable(false).build();
+        let request = CoapRequest::new(RequestType::Get)
+            .confirmable(false)
+            .build();
         let client_request = ClientRequest {
             peer: addr_b,
             request,
-            timeout: Duration::from_secs(5),
         };
         let response_rx = client.send_request(client_request).await.unwrap();
 

@@ -1,6 +1,3 @@
-use std::net::SocketAddr;
-
-use coap_lite::Packet;
 use tokio::sync::oneshot;
 use tokio::time::Instant;
 
@@ -8,8 +5,6 @@ use super::reliability::{NON_LIFETIME, RetransmitState};
 use crate::{CoapResponse, transport::TransportError};
 
 pub struct Exchange {
-    token: Vec<u8>,
-    peer: SocketAddr,
     response_tx: oneshot::Sender<Result<CoapResponse, TransportError>>,
     /// MID assigned to the outbound CON. None for NON exchanges.
     message_id: Option<u16>,
@@ -22,16 +17,12 @@ pub struct Exchange {
 impl Exchange {
     /// Create an exchange for a CON request (with retransmission tracking).
     pub fn new_con(
-        token: Vec<u8>,
-        peer: SocketAddr,
         response_tx: oneshot::Sender<Result<CoapResponse, TransportError>>,
         message_id: u16,
         packet_bytes: Vec<u8>,
         now: Instant,
     ) -> Self {
         Self {
-            token,
-            peer,
             response_tx,
             message_id: Some(message_id),
             retransmit: Some(RetransmitState::new(packet_bytes, now)),
@@ -41,14 +32,10 @@ impl Exchange {
 
     /// Create an exchange for a NON request (no retransmission, expires after NON_LIFETIME).
     pub fn new_non(
-        token: Vec<u8>,
-        peer: SocketAddr,
         response_tx: oneshot::Sender<Result<CoapResponse, TransportError>>,
         now: Instant,
     ) -> Self {
         Self {
-            token,
-            peer,
             response_tx,
             message_id: None,
             retransmit: None,
@@ -56,13 +43,13 @@ impl Exchange {
         }
     }
 
-    pub fn token(&self) -> &[u8] {
-        &self.token
-    }
+    // pub fn token(&self) -> &[u8] {
+    //     &self.token
+    // }
 
-    pub fn peer(&self) -> SocketAddr {
-        self.peer
-    }
+    // pub fn peer(&self) -> SocketAddr {
+    //     self.peer
+    // }
 
     pub fn message_id(&self) -> Option<u16> {
         self.message_id

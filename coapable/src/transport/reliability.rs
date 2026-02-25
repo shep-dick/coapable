@@ -7,6 +7,7 @@ use tokio::time::Instant;
 pub const ACK_TIMEOUT: Duration = Duration::from_secs(2);
 pub const ACK_RANDOM_FACTOR: f64 = 1.5;
 pub const MAX_RETRANSMIT: u32 = 4;
+#[allow(dead_code)]
 pub const MAX_LATENCY: Duration = Duration::from_secs(100);
 pub const EXCHANGE_LIFETIME: Duration = Duration::from_secs(247);
 pub const NON_LIFETIME: Duration = Duration::from_secs(145);

@@ -1,2 +1,3 @@
 [workspace]
 members = ["coapable"]
+resolver = "3"

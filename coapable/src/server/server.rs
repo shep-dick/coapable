@@ -1,7 +1,5 @@
 use std::net::SocketAddr;
 
-use coap_lite::MessageType;
-
 use crate::CoapResponse;
 use crate::message_types::CoapRequest;
 use crate::transport::ServerInterface;

@@ -223,6 +223,22 @@ impl CoapRequest {
             .unwrap_or_default();
 
         let content_format = packet.get_content_format();
+
+        let accept = match packet.get_option(CoapOption::Accept) {
+            // I don't know why coap_lite uses a LinkedList here... RFC 7252 implies only one CF is contained in the Accept option.
+            // For now we'll just use the front element of the list.
+            Some(l) => match l.front() {
+                Some(raw) => {
+                    let mut bytes = [0u8; 8];
+                    bytes.clone_from_slice(&raw);
+                    let cf_code = usize::from_be_bytes(bytes);
+                    ContentFormat::try_from(cf_code).ok()
+                }
+                None => None,
+            },
+            None => None,
+        };
+
         let payload = packet.payload.to_owned();
         let confirmable = packet.header.get_type() == MessageType::Confirmable;
 
@@ -232,7 +248,7 @@ impl CoapRequest {
             queries,
             content_format,
             payload,
-            accept: None,
+            accept,
             confirmable,
         })
     }

@@ -57,7 +57,6 @@ impl CoapClient {
 pub struct ClientRequest {
     pub(crate) peer: SocketAddr,
     pub(crate) request: CoapRequest,
-    pub(crate) timeout: Duration,
 }
 
 /// Builds a CoAP request with a fluent API.
@@ -119,7 +118,7 @@ impl ClientRequestBuilder {
         self
     }
 
-    /// Sets the request timeout (default: 30 seconds).
+    /// Sets the request timeout.
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
@@ -132,7 +131,6 @@ impl ClientRequestBuilder {
         let client_request = ClientRequest {
             peer: self.peer,
             request,
-            timeout: self.timeout,
         };
 
         let response_rx = self.interface.send_request(client_request).await?;
@@ -153,16 +151,6 @@ mod tests {
     use crate::transport::{CoapEndpoint, CoapStack};
     use coap_lite::{CoapOption, MessageClass, MessageType, Packet, ResponseType};
     use tokio::net::UdpSocket;
-
-    #[tokio::test]
-    async fn clone_client() {
-        let sock_a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let endpoint = CoapEndpoint::start(sock_a).await.unwrap();
-        let (client_if, _server, _stack) = CoapStack::start(endpoint).await.unwrap();
-        let client = CoapClient::new(client_if);
-        let client2 = client.clone();
-        let client3 = client.clone();
-    }
 
     #[tokio::test]
     async fn get_with_non_response() {

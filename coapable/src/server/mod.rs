@@ -8,4 +8,5 @@ pub use server::CoapServer;
 #[derive(Debug, thiserror::Error)]
 pub enum ServerError {}
 
+#[allow(dead_code)]
 type Result<T> = std::result::Result<T, ServerError>;
