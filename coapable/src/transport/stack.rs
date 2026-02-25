@@ -147,18 +147,29 @@ impl CoapStack {
                                 }
                                 session.record_inbound_mid(mid, now);
 
-                                // Auto-ACK for CON
-                                if msg_type == MessageType::Confirmable { // @TODO: implement piggyback ACK response
-                                    let mut ack = Packet::new();
-                                    ack.header.set_type(MessageType::Acknowledgement);
-                                    ack.header.code = MessageClass::Empty;
-                                    ack.header.message_id = mid;
-                                    if let Ok(ack_bytes) = ack.to_bytes() {
-                                        endpoint.send_packet(
-                                            Bytes::copy_from_slice(&ack_bytes),
-                                            peer,
-                                        ).await?;
-                                        session.cache_response_for_mid(mid, ack_bytes);
+                                // CON handling: defer ACK for requests (piggyback),
+                                // immediate empty ACK for pings and non-request codes.
+                                if msg_type == MessageType::Confirmable {
+                                    match parsed.header.code {
+                                        MessageClass::Request(_) => {
+                                            // Record token→MID; ACK will be piggybacked on the response.
+                                            let token = parsed.get_token().to_vec();
+                                            session.record_inbound_con(token, mid);
+                                        }
+                                        _ => {
+                                            // Empty CON (ping) or other: immediate empty ACK.
+                                            let mut ack = Packet::new();
+                                            ack.header.set_type(MessageType::Acknowledgement);
+                                            ack.header.code = MessageClass::Empty;
+                                            ack.header.message_id = mid;
+                                            if let Ok(ack_bytes) = ack.to_bytes() {
+                                                endpoint.send_packet(
+                                                    Bytes::copy_from_slice(&ack_bytes),
+                                                    peer,
+                                                ).await?;
+                                                session.cache_response_for_mid(mid, ack_bytes);
+                                            }
+                                        }
                                     }
                                 }
 
@@ -264,11 +275,19 @@ impl CoapStack {
                                     .entry(resp.peer)
                                     .or_insert_with(|| PeerSession::new(resp.peer));
 
-                                let mid = session.allocate_mid();
+                                // Piggyback if the original request was CON,
+                                // otherwise send as separate NON response.
+                                let (mid, msg_type) = match session.take_inbound_con_mid(&resp.token) {
+                                    Some(con_mid) => (con_mid, MessageType::Acknowledgement),
+                                    None => (session.allocate_mid(), MessageType::NonConfirmable),
+                                };
 
-                                let pkt = resp.response.to_packet(resp.token, mid, MessageType::NonConfirmable);
+                                let pkt = resp.response.to_packet(resp.token, mid, msg_type);
 
                                 if let Ok(bytes) = pkt.to_bytes() {
+                                    if msg_type == MessageType::Acknowledgement {
+                                        session.cache_response_for_mid(mid, bytes.clone());
+                                    }
                                     endpoint.send_packet(Bytes::from(bytes), resp.peer).await?;
                                 }
                             }
@@ -548,7 +567,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inbound_con_request_triggers_auto_ack() {
+    async fn inbound_con_request_piggybacked_response() {
         let sock_a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let addr_a = sock_a.local_addr().unwrap();
         let sock_b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -568,18 +587,35 @@ mod tests {
             .await
             .unwrap();
 
-        // Peer B should receive an auto-ACK
+        // Server receives the request
+        let req = server.recv_request().await.unwrap();
+        assert_eq!(req.peer, addr_b);
+        assert_eq!(req.token, &[40, 41]);
+
+        // Server sends a response
+        let response = CoapResponse::new(ResponseType::Content)
+            .payload(b"piggybacked")
+            .build();
+        server
+            .send_response(ServerResponse {
+                response,
+                peer: addr_b,
+                token: req.token,
+            })
+            .await
+            .unwrap();
+
+        // Peer B should receive a piggybacked ACK (not an empty ACK)
         let mut buf = [0u8; 2048];
         let (n, _) = sock_b.recv_from(&mut buf).await.unwrap();
         let ack = Packet::from_bytes(&buf[..n]).unwrap();
         assert_eq!(ack.header.get_type(), MessageType::Acknowledgement);
         assert_eq!(ack.header.message_id, 12345);
-        assert!(matches!(ack.header.code, MessageClass::Empty));
-
-        // Server should also receive the request
-        let req = server.recv_request().await.unwrap();
-        assert_eq!(req.peer, addr_b);
-        assert_eq!(req.token, &[40, 41]);
+        assert!(matches!(
+            ack.header.code,
+            MessageClass::Response(ResponseType::Content)
+        ));
+        assert_eq!(ack.payload, b"piggybacked");
 
         drop(_client);
         drop(server);
@@ -738,11 +774,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn duplicate_con_gets_cached_ack() {
+    async fn duplicate_con_replays_piggybacked_response() {
         let sock_a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let addr_a = sock_a.local_addr().unwrap();
         let sock_b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let _addr_b = sock_b.local_addr().unwrap();
+        let addr_b = sock_b.local_addr().unwrap();
 
         let endpoint = CoapEndpoint::start(sock_a).await.unwrap();
         let (_client, mut server, stack) = CoapStack::start(endpoint).await.unwrap();
@@ -757,26 +793,47 @@ mod tests {
 
         sock_b.send_to(&request_bytes, addr_a).await.unwrap();
 
-        // Peer B receives the auto-ACK
+        // Server receives the request and responds
+        let req = server.recv_request().await.unwrap();
+        assert_eq!(req.token, &[80, 81]);
+
+        let response = CoapResponse::new(ResponseType::Content)
+            .payload(b"cached-payload")
+            .build();
+        server
+            .send_response(ServerResponse {
+                response,
+                peer: addr_b,
+                token: req.token,
+            })
+            .await
+            .unwrap();
+
+        // Peer B receives the piggybacked response
         let mut buf = [0u8; 2048];
         let (n, _) = sock_b.recv_from(&mut buf).await.unwrap();
         let ack1 = Packet::from_bytes(&buf[..n]).unwrap();
         assert_eq!(ack1.header.get_type(), MessageType::Acknowledgement);
         assert_eq!(ack1.header.message_id, 5555);
+        assert!(matches!(
+            ack1.header.code,
+            MessageClass::Response(ResponseType::Content)
+        ));
+        assert_eq!(ack1.payload, b"cached-payload");
 
-        // Server receives the request
-        let req = server.recv_request().await.unwrap();
-        assert_eq!(req.token, &[80, 81]);
-
-        // Peer B sends the same CON request again (duplicate)
+        // Peer B sends the same CON request again (duplicate / late retransmit)
         sock_b.send_to(&request_bytes, addr_a).await.unwrap();
 
-        // Peer B should receive a second ACK with the same MID
+        // Peer B should receive the cached piggybacked response again
         let (n2, _) = sock_b.recv_from(&mut buf).await.unwrap();
         let ack2 = Packet::from_bytes(&buf[..n2]).unwrap();
         assert_eq!(ack2.header.get_type(), MessageType::Acknowledgement);
         assert_eq!(ack2.header.message_id, 5555);
-        assert!(matches!(ack2.header.code, MessageClass::Empty));
+        assert!(matches!(
+            ack2.header.code,
+            MessageClass::Response(ResponseType::Content)
+        ));
+        assert_eq!(ack2.payload, b"cached-payload");
 
         drop(_client);
         drop(server);

@@ -20,6 +20,8 @@ pub struct PeerSession {
     token_allocator: TokenAllocator,
     /// Dedup table for inbound messages, keyed by MID.
     inbound_dedup: HashMap<u16, DedupEntry>,
+    /// Maps inbound CON request token → original MID, for piggybacked ACK responses.
+    inbound_con_mids: HashMap<Vec<u8>, u16>,
 }
 
 pub enum AckResult {
@@ -40,6 +42,7 @@ impl PeerSession {
             mid_allocator: MessageIdAllocator::new(),
             token_allocator: TokenAllocator::new(),
             inbound_dedup: HashMap::new(),
+            inbound_con_mids: HashMap::new(),
         }
     }
 
@@ -49,7 +52,10 @@ impl PeerSession {
 
     /// Returns true if this session has no active state and can be evicted.
     pub fn is_idle(&self) -> bool {
-        self.exchanges.is_empty() && self.mid_to_token.is_empty() && self.inbound_dedup.is_empty()
+        self.exchanges.is_empty()
+            && self.mid_to_token.is_empty()
+            && self.inbound_dedup.is_empty()
+            && self.inbound_con_mids.is_empty()
     }
 
     /// Allocate the next MID for an outbound message.
@@ -152,6 +158,18 @@ impl PeerSession {
             .and_then(|e| e.cached_response.as_deref())
     }
 
+    /// Record the MID of an inbound CON request for piggybacked ACK response.
+    pub fn record_inbound_con(&mut self, token: Vec<u8>, mid: u16) {
+        self.inbound_con_mids.insert(token, mid);
+    }
+
+    /// Take the original CON MID for the given token, if present.
+    /// Returns `Some(mid)` if the request was CON (piggyback the response),
+    /// or `None` if it was NON (send separate response).
+    pub fn take_inbound_con_mid(&mut self, token: &[u8]) -> Option<u16> {
+        self.inbound_con_mids.remove(token)
+    }
+
     /// Collect exchanges that need retransmission. Returns bytes to re-send.
     /// Fails exchanges that have exceeded MAX_RETRANSMIT or NON_LIFETIME.
     pub fn collect_retransmissions(&mut self, now: Instant) -> Vec<Vec<u8>> {
@@ -219,5 +237,25 @@ mod tests {
         tokio::time::advance(EXCHANGE_LIFETIME).await;
         session.evict_stale_dedup(Instant::now());
         assert!(session.is_idle());
+    }
+
+    #[test]
+    fn inbound_con_mid_lifecycle() {
+        let peer = "127.0.0.1:5683".parse().unwrap();
+        let mut session = PeerSession::new(peer);
+
+        // No pending CON MID initially
+        assert!(session.take_inbound_con_mid(&[1, 2]).is_none());
+
+        // Record a CON MID
+        session.record_inbound_con(vec![1, 2], 4000);
+        assert!(!session.is_idle());
+
+        // Take it back
+        let mid = session.take_inbound_con_mid(&[1, 2]);
+        assert_eq!(mid, Some(4000));
+
+        // Gone after take
+        assert!(session.take_inbound_con_mid(&[1, 2]).is_none());
     }
 }
