@@ -21,6 +21,7 @@ pub struct CoapResponseBuilder {
     response_type: ResponseType,
     content_format: Option<ContentFormat>,
     payload: Vec<u8>,
+    confirmable: bool,
 }
 
 impl CoapResponseBuilder {
@@ -29,6 +30,7 @@ impl CoapResponseBuilder {
             response_type,
             content_format: None,
             payload: Vec::new(),
+            confirmable: false,
         }
     }
 
@@ -42,11 +44,17 @@ impl CoapResponseBuilder {
         self
     }
 
+    pub fn confirmable(mut self, confirmable: bool) -> Self {
+        self.confirmable = confirmable;
+        self
+    }
+
     pub fn build(self) -> CoapResponse {
         CoapResponse {
             response_type: self.response_type,
             content_format: self.content_format,
             payload: self.payload,
+            confirmable: self.confirmable,
         }
     }
 }
@@ -56,6 +64,7 @@ pub struct CoapResponse {
     response_type: ResponseType,
     content_format: Option<ContentFormat>,
     payload: Vec<u8>,
+    confirmable: bool,
 }
 
 impl CoapResponse {
@@ -69,6 +78,8 @@ impl CoapResponse {
             _ => Err(MessageError::NotAResponse),
         }?;
 
+        let confirmable = packet.header.get_type() == MessageType::Confirmable;
+
         let content_format = packet.get_content_format();
 
         let payload = packet.payload.to_owned();
@@ -77,6 +88,7 @@ impl CoapResponse {
             response_type,
             content_format,
             payload,
+            confirmable,
         })
     }
 
@@ -96,11 +108,20 @@ impl CoapResponse {
         self.content_format
     }
 
+    pub fn confirmable(&self) -> bool {
+        self.confirmable
+    }
+
     pub(crate) fn to_packet(self, token: Vec<u8>, mid: u16) -> Packet {
         let mut pkt = Packet::new();
 
         pkt.set_token(token);
         pkt.header.message_id = mid;
+
+        pkt.header.set_type(match self.confirmable {
+            true => MessageType::Confirmable,
+            false => MessageType::NonConfirmable,
+        });
 
         pkt.header.code = MessageClass::Response(self.response_type);
 
