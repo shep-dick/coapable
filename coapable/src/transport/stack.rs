@@ -7,6 +7,9 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant};
 
+use crate::CoapRequest;
+use crate::client::ClientRequest;
+
 use super::endpoint::CoapEndpoint;
 use super::exchange::Exchange;
 use super::reliability::IDLE_SESSION_CLEANUP_INTERVAL_SECS;
@@ -16,34 +19,36 @@ use super::{Result, TransportError};
 /// An inbound CoAP request destined for server handlers.
 pub type ServerRequest = (Packet, SocketAddr);
 
-enum Outbound {
-    /// Client sending a request; expects a response via oneshot.
-    Request {
-        packet: Packet,
-        peer: SocketAddr,
-        response_tx: oneshot::Sender<std::result::Result<Packet, TransportError>>,
-    },
-    /// Server sending a response.
-    Response { packet: Packet, peer: SocketAddr },
+struct OutboundResponse {
+    packet: Packet,
+    peer: SocketAddr,
+}
+
+struct OutboundRequest {
+    request: CoapRequest,
+    peer: SocketAddr,
+    response_tx: oneshot::Sender<std::result::Result<Packet, TransportError>>,
 }
 
 #[derive(Clone)]
 pub struct ClientInterface {
-    outbound_sender: mpsc::Sender<Outbound>,
+    outbound_sender: mpsc::Sender<OutboundRequest>,
 }
 
 impl ClientInterface {
     /// Send a CoAP request to a peer. Returns a receiver for the response.
     pub async fn send_request(
         &self,
-        packet: Packet,
-        peer: SocketAddr,
+        client_request: ClientRequest,
     ) -> Result<oneshot::Receiver<std::result::Result<Packet, TransportError>>> {
+        let r = client_request.request;
+
         let (response_tx, response_rx) = oneshot::channel();
+
         self.outbound_sender
-            .send(Outbound::Request {
-                packet,
-                peer,
+            .send(OutboundRequest {
+                request: r,
+                peer: client_request.peer,
                 response_tx,
             })
             .await
@@ -53,7 +58,7 @@ impl ClientInterface {
 }
 
 pub struct ServerInterface {
-    outbound_sender: mpsc::Sender<Outbound>,
+    outbound_sender: mpsc::Sender<OutboundResponse>,
     server_request_receiver: mpsc::Receiver<ServerRequest>,
 }
 
@@ -61,7 +66,7 @@ impl ServerInterface {
     /// Send a CoAP response to a peer (server-side).
     pub async fn send_response(&self, packet: Packet, peer: SocketAddr) -> Result<()> {
         self.outbound_sender
-            .send(Outbound::Response { packet, peer })
+            .send(OutboundResponse { packet, peer })
             .await
             .map_err(|_| TransportError::EndpointClosed)?;
         Ok(())
@@ -85,8 +90,11 @@ impl CoapStack {
     pub async fn start(
         mut endpoint: CoapEndpoint,
     ) -> Result<(ClientInterface, ServerInterface, Self)> {
-        let (outbound_sender, mut outbound_receiver) = mpsc::channel::<Outbound>(100);
+        let (outbound_response_sender, mut outbound_response_receiver) =
+            mpsc::channel::<OutboundResponse>(100);
         let (server_request_sender, server_request_receiver) = mpsc::channel::<ServerRequest>(100);
+        let (outbound_request_sender, mut outbound_request_receiver) =
+            mpsc::channel::<OutboundRequest>(100);
 
         let task = tokio::spawn(async move {
             let mut sessions: HashMap<SocketAddr, PeerSession> = HashMap::new();
@@ -200,24 +208,27 @@ impl CoapStack {
                         }
                     }
 
-                    // Outbound: application wants to send
-                    res = outbound_receiver.recv() => {
+                    // Outbound Request: client sending request
+                    res = outbound_request_receiver.recv() => {
                         match res {
-                            Some(Outbound::Request { mut packet, peer, response_tx }) => {
+                            Some(req) => {
+
                                 let session = sessions
-                                    .entry(peer)
-                                    .or_insert_with(|| PeerSession::new(peer));
+                                    .entry(req.peer)
+                                    .or_insert_with(|| PeerSession::new(req.peer));
 
-                                if packet.get_token().is_empty() {
-                                    let token = session.allocate_token();
-                                    packet.set_token(token);
-                                }
-                                let token = packet.get_token().to_vec();
+                                let token = session.allocate_token();
                                 let mid = session.allocate_mid();
-                                packet.header.message_id = mid;
 
-                                let is_con = packet.header.get_type() == MessageType::Confirmable;
-                                let bytes = match packet.to_bytes() {
+
+                                // @TODO: turn CoapRequest into coap_lite::Packet
+
+
+                                let is_con = req.request.confirmable();
+
+                                let pkt = req.request.to_packet(token.clone(), mid);
+
+                                let bytes = match pkt.to_bytes() {
                                     Ok(b) => b,
                                     Err(_) => continue,
                                 };
@@ -225,14 +236,14 @@ impl CoapStack {
                                 let exchange = if is_con {
                                     Exchange::new_con(
                                         token.clone(),
-                                        peer,
-                                        response_tx,
+                                        req.peer,
+                                        req.response_tx,
                                         mid,
                                         bytes.clone(),
                                         Instant::now(),
                                     )
                                 } else {
-                                    Exchange::new_non(token.clone(), peer, response_tx, Instant::now())
+                                    Exchange::new_non(token.clone(), req.peer, req.response_tx, Instant::now())
                                 };
 
                                 if is_con {
@@ -241,11 +252,21 @@ impl CoapStack {
                                     session.insert_exchange(token, exchange);
                                 }
 
-                                endpoint.send_packet(Bytes::from(bytes), peer).await?;
+                                endpoint.send_packet(Bytes::from(bytes), req.peer).await?;
                             }
-                            Some(Outbound::Response { packet, peer }) => {
-                                if let Ok(bytes) = packet.to_bytes() {
-                                    endpoint.send_packet(Bytes::from(bytes), peer).await?;
+                            None => {
+                                return Ok(())
+                            }
+                        }
+
+                    }
+
+                    // Outbound: application wants to send
+                    res = outbound_response_receiver.recv() => {
+                        match res {
+                            Some(resp) => {
+                                if let Ok(bytes) = resp.packet.to_bytes() {
+                                    endpoint.send_packet(Bytes::from(bytes), resp.peer).await?;
                                 }
                             }
                             None => return Ok(()),
@@ -280,10 +301,10 @@ impl CoapStack {
 
         Ok((
             ClientInterface {
-                outbound_sender: outbound_sender.clone(),
+                outbound_sender: outbound_request_sender.clone(),
             },
             ServerInterface {
-                outbound_sender,
+                outbound_sender: outbound_response_sender,
                 server_request_receiver,
             },
             CoapStack { task },
@@ -691,7 +712,10 @@ mod tests {
 
         // The exchange should expire after NON_LIFETIME
         let result = response_rx.await.unwrap();
-        assert!(matches!(result, Err(TransportError::Timeout { retransmits: 0 })));
+        assert!(matches!(
+            result,
+            Err(TransportError::Timeout { retransmits: 0 })
+        ));
 
         drop(client);
         drop(_server);

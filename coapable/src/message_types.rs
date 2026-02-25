@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use coap_lite::{
     CoapOption, ContentFormat, MessageClass, Packet, RequestType, ResponseType,
     option_value::OptionValueU16,
@@ -219,7 +217,7 @@ impl CoapRequest {
         self.confirmable
     }
 
-    pub fn to_packet(self, token: Vec<u8>, mid: u16) -> Result<Packet> {
+    pub fn to_packet(self, token: Vec<u8>, mid: u16) -> Packet {
         let mut pkt = Packet::new();
 
         pkt.set_token(token);
@@ -231,8 +229,6 @@ impl CoapRequest {
             for segment in self.path.split('/').filter(|s| !s.is_empty()) {
                 pkt.add_option(CoapOption::UriPath, segment.as_bytes().to_vec());
             }
-        } else {
-            return Err(MessageError::InvalidUriPath);
         }
 
         for query in &self.queries {
@@ -252,6 +248,6 @@ impl CoapRequest {
             pkt.payload = self.payload
         }
 
-        Ok(pkt)
+        pkt
     }
 }

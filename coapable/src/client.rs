@@ -57,7 +57,6 @@ impl CoapClient {
 }
 
 pub struct ClientRequest {
-    pub(crate) interface: ClientInterface,
     pub(crate) peer: SocketAddr,
     pub(crate) request: CoapRequest,
     pub(crate) timeout: Duration,
@@ -133,16 +132,12 @@ impl ClientRequestBuilder {
         let request = self.base.build();
 
         let client_request = ClientRequest {
-            interface: self.interface,
             peer: self.peer,
             request,
             timeout: self.timeout,
         };
 
-        let response_rx = self
-            .interface
-            .send_request(client_request, self.peer)
-            .await?;
+        let response_rx = self.interface.send_request(client_request).await?;
         let packet = match tokio::time::timeout(self.timeout, response_rx).await {
             Ok(Ok(Ok(packet))) => packet,
             Ok(Ok(Err(transport_err))) => return Err(transport_err.into()),
@@ -150,7 +145,7 @@ impl ClientRequestBuilder {
             Err(_) => return Err(ClientError::Timeout),
         };
 
-        Ok(CoapResponse::from_packet(packet)?)
+        Ok(CoapResponse::from_packet(&packet)?)
     }
 }
 
