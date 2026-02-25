@@ -229,7 +229,8 @@ impl CoapRequest {
             Some(l) => match l.front() {
                 Some(raw) => {
                     let mut bytes = [0u8; 8];
-                    bytes.clone_from_slice(&raw);
+                    let offset = 8 - raw.len();
+                    bytes[offset..].clone_from_slice(&raw);
                     let cf_code = usize::from_be_bytes(bytes);
                     ContentFormat::try_from(cf_code).ok()
                 }
@@ -301,7 +302,7 @@ impl CoapRequest {
             false => MessageType::NonConfirmable,
         });
 
-        if self.path.is_empty() {
+        if !self.path.is_empty() {
             for segment in self.path.split('/').filter(|s| !s.is_empty()) {
                 pkt.add_option(CoapOption::UriPath, segment.as_bytes().to_vec());
             }
@@ -320,7 +321,7 @@ impl CoapRequest {
             pkt.add_option_as(CoapOption::Accept, OptionValueU16(value));
         }
 
-        if self.payload.is_empty() {
+        if !self.payload.is_empty() {
             pkt.payload = self.payload
         }
 
