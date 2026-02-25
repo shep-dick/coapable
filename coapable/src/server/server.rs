@@ -1,9 +1,24 @@
+use std::net::SocketAddr;
+
 use coap_lite::MessageType;
 
+use crate::CoapResponse;
 use crate::message_types::CoapRequest;
 use crate::transport::ServerInterface;
 
 use super::router::Router;
+
+pub(crate) struct ServerRequest {
+    pub request: CoapRequest,
+    pub peer: SocketAddr,
+    pub token: Vec<u8>,
+}
+
+pub(crate) struct ServerResponse {
+    pub response: CoapResponse,
+    pub peer: SocketAddr,
+    pub token: Vec<u8>,
+}
 
 pub struct CoapServer {
     interface: ServerInterface,
@@ -17,21 +32,23 @@ impl CoapServer {
 
     pub async fn run(mut self) {
         loop {
-            let (packet, peer) = match self.interface.recv_request().await {
+            let req = match self.interface.recv_request().await {
                 Ok(req) => req,
                 Err(_) => break,
             };
 
-            let token = packet.get_token().to_vec();
-            let request = CoapRequest::from_raw(packet, peer);
+            let token = req.token;
+            let request = req.request;
 
             let response = self.router.dispatch(request).await;
 
-            let mut response_packet = response.into_packet();
-            response_packet.set_token(token);
-            response_packet.header.set_type(MessageType::NonConfirmable);
+            let resp = ServerResponse {
+                response,
+                peer: req.peer,
+                token,
+            };
 
-            let _ = self.interface.send_response(response_packet, peer).await;
+            let _ = self.interface.send_response(resp).await;
         }
     }
 }

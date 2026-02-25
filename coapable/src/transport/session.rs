@@ -4,6 +4,8 @@ use std::net::SocketAddr;
 use coap_lite::{MessageClass, Packet};
 use tokio::time::Instant;
 
+use crate::CoapResponse;
+
 use super::exchange::Exchange;
 use super::reliability::{DedupEntry, EXCHANGE_LIFETIME, MessageIdAllocator, TokenAllocator};
 
@@ -47,9 +49,7 @@ impl PeerSession {
 
     /// Returns true if this session has no active state and can be evicted.
     pub fn is_idle(&self) -> bool {
-        self.exchanges.is_empty()
-            && self.mid_to_token.is_empty()
-            && self.inbound_dedup.is_empty()
+        self.exchanges.is_empty() && self.mid_to_token.is_empty() && self.inbound_dedup.is_empty()
     }
 
     /// Allocate the next MID for an outbound message.
@@ -75,7 +75,7 @@ impl PeerSession {
 
     /// Match an inbound response to an outstanding exchange by token.
     /// Delivers the response and removes the exchange.
-    pub fn complete_exchange(&mut self, token: &[u8], response: Packet) -> bool {
+    pub fn complete_exchange(&mut self, token: &[u8], response: CoapResponse) -> bool {
         if let Some(exchange) = self.exchanges.remove(token) {
             // Also clean up the MID index if present
             if let Some(mid) = exchange.message_id() {

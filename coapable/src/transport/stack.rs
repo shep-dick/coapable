@@ -7,8 +7,9 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant};
 
-use crate::CoapRequest;
 use crate::client::ClientRequest;
+use crate::server::server::{ServerRequest, ServerResponse};
+use crate::{CoapRequest, CoapResponse};
 
 use super::endpoint::CoapEndpoint;
 use super::exchange::Exchange;
@@ -16,18 +17,16 @@ use super::reliability::IDLE_SESSION_CLEANUP_INTERVAL_SECS;
 use super::session::{AckResult, PeerSession};
 use super::{Result, TransportError};
 
-/// An inbound CoAP request destined for server handlers.
-pub type ServerRequest = (Packet, SocketAddr);
-
 struct OutboundResponse {
-    packet: Packet,
+    response: CoapResponse,
     peer: SocketAddr,
+    token: Vec<u8>,
 }
 
 struct OutboundRequest {
     request: CoapRequest,
     peer: SocketAddr,
-    response_tx: oneshot::Sender<std::result::Result<Packet, TransportError>>,
+    response_tx: oneshot::Sender<std::result::Result<CoapResponse, TransportError>>,
 }
 
 #[derive(Clone)]
@@ -40,10 +39,11 @@ impl ClientInterface {
     pub async fn send_request(
         &self,
         client_request: ClientRequest,
-    ) -> Result<oneshot::Receiver<std::result::Result<Packet, TransportError>>> {
+    ) -> Result<oneshot::Receiver<std::result::Result<CoapResponse, TransportError>>> {
         let r = client_request.request;
 
-        let (response_tx, response_rx) = oneshot::channel();
+        let (response_tx, response_rx) =
+            oneshot::channel::<std::result::Result<CoapResponse, TransportError>>();
 
         self.outbound_sender
             .send(OutboundRequest {
@@ -64,9 +64,13 @@ pub struct ServerInterface {
 
 impl ServerInterface {
     /// Send a CoAP response to a peer (server-side).
-    pub async fn send_response(&self, packet: Packet, peer: SocketAddr) -> Result<()> {
+    pub async fn send_response(&self, server_response: ServerResponse) -> Result<()> {
         self.outbound_sender
-            .send(OutboundResponse { packet, peer })
+            .send(OutboundResponse {
+                response: server_response.response,
+                peer: server_response.peer,
+                token: server_response.token,
+            })
             .await
             .map_err(|_| TransportError::EndpointClosed)?;
         Ok(())
@@ -208,7 +212,7 @@ impl CoapStack {
                         }
                     }
 
-                    // Outbound Request: client sending request
+                    // Outbound Request: client wants to send request
                     res = outbound_request_receiver.recv() => {
                         match res {
                             Some(req) => {
@@ -261,11 +265,20 @@ impl CoapStack {
 
                     }
 
-                    // Outbound: application wants to send
+                    // Outbound Response: server wants to send repsonse
                     res = outbound_response_receiver.recv() => {
                         match res {
                             Some(resp) => {
-                                if let Ok(bytes) = resp.packet.to_bytes() {
+
+                                let session = sessions
+                                    .entry(resp.peer)
+                                    .or_insert_with(|| PeerSession::new(resp.peer));
+
+                                let mid = session.allocate_mid();
+
+                                let pkt = resp.response.to_packet(resp.token, mid);
+
+                                if let Ok(bytes) = pkt.to_bytes() {
                                     endpoint.send_packet(Bytes::from(bytes), resp.peer).await?;
                                 }
                             }

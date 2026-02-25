@@ -1,8 +1,8 @@
 mod handler;
 pub mod router;
-mod server;
+pub mod server;
 
-pub use router::{get, post, put, delete, MethodRouter, Router};
+pub use router::{MethodRouter, Router, delete, get, post, put};
 pub use server::CoapServer;
 
 #[derive(Debug, thiserror::Error)]

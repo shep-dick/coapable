@@ -16,27 +16,25 @@ pub enum MessageError {
 
 pub struct CoapResponseBuilder {
     response_type: ResponseType,
-    token: Vec<u8>,
     content_format: Option<ContentFormat>,
     payload: Vec<u8>,
 }
 
 impl CoapResponseBuilder {
-    pub fn new(response_type: ResponseType, token: Vec<u8>) -> Self {
+    pub fn new(response_type: ResponseType) -> Self {
         Self {
             response_type,
-            token,
             content_format: None,
             payload: Vec::new(),
         }
     }
 
-    pub fn content_format(&mut self, content_format: ContentFormat) -> &Self {
+    pub fn content_format(mut self, content_format: ContentFormat) -> Self {
         self.content_format = Some(content_format);
         self
     }
 
-    pub fn payload(&mut self, payload: &[u8]) -> &Self {
+    pub fn payload(mut self, payload: &[u8]) -> Self {
         self.payload.clone_from_slice(payload);
         self
     }
@@ -44,7 +42,6 @@ impl CoapResponseBuilder {
     pub fn build(self) -> CoapResponse {
         CoapResponse {
             response_type: self.response_type,
-            token: self.token,
             content_format: self.content_format,
             payload: self.payload,
         }
@@ -54,14 +51,13 @@ impl CoapResponseBuilder {
 /// A CoAP response received from a peer.
 pub struct CoapResponse {
     response_type: ResponseType,
-    token: Vec<u8>,
     content_format: Option<ContentFormat>,
     payload: Vec<u8>,
 }
 
 impl CoapResponse {
-    pub fn new(response_type: ResponseType, token: Vec<u8>) -> CoapResponseBuilder {
-        CoapResponseBuilder::new(response_type, token)
+    pub fn new(response_type: ResponseType) -> CoapResponseBuilder {
+        CoapResponseBuilder::new(response_type)
     }
 
     pub fn from_packet(packet: &Packet) -> Result<Self> {
@@ -70,15 +66,12 @@ impl CoapResponse {
             _ => Err(MessageError::NotAResponse),
         }?;
 
-        let token = packet.get_token().to_vec();
-
         let content_format = packet.get_content_format();
 
         let payload = packet.payload.to_owned();
 
         Ok(Self {
             response_type,
-            token,
             content_format,
             payload,
         })
@@ -98,6 +91,24 @@ impl CoapResponse {
 
     pub fn content_format(&self) -> Option<ContentFormat> {
         self.content_format
+    }
+
+    pub fn to_packet(self, token: Vec<u8>, mid: u16) -> Packet {
+        let mut pkt = Packet::new();
+
+        pkt.set_token(token);
+        pkt.header.message_id = mid;
+
+        pkt.header
+            .set_code(&MessageClass::Response(self.response_type).to_string());
+
+        pkt.payload = self.payload;
+
+        if let Some(cf) = self.content_format {
+            pkt.set_content_format(cf);
+        }
+
+        pkt
     }
 }
 
@@ -124,32 +135,32 @@ impl CoapRequestBuilder {
         }
     }
 
-    pub fn path(&mut self, path: &str) -> &Self {
+    pub fn path(mut self, path: &str) -> Self {
         self.path.push_str(path);
         self
     }
 
-    pub fn query(&mut self, query: &str) -> &Self {
+    pub fn query(mut self, query: &str) -> Self {
         self.queries.push(query.to_string());
         self
     }
 
-    pub fn content_format(&mut self, content_format: ContentFormat) -> &Self {
+    pub fn content_format(mut self, content_format: ContentFormat) -> Self {
         self.content_format = Some(content_format);
         self
     }
 
-    pub fn payload(&mut self, payload: &[u8]) -> &Self {
+    pub fn payload(mut self, payload: &[u8]) -> Self {
         self.payload.clone_from_slice(payload);
         self
     }
 
-    pub fn accept(&mut self, content_format: ContentFormat) -> &Self {
+    pub fn accept(mut self, content_format: ContentFormat) -> Self {
         self.accept = Some(content_format);
         self
     }
 
-    pub fn confirmable(&mut self, confirmable: bool) -> &Self {
+    pub fn confirmable(mut self, confirmable: bool) -> Self {
         self.confirmable = confirmable;
         self
     }

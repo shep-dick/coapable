@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use coap_lite::RequestType;
+use coap_lite::{RequestType, ResponseType};
 
 use super::handler::Handler;
 use crate::message_types::{CoapRequest, CoapResponse};
@@ -53,7 +53,7 @@ impl MethodRouter {
 
         match handler {
             Some(h) => h.call(req).await,
-            None => CoapResponse::method_not_allowed(),
+            None => CoapResponse::new(ResponseType::MethodNotAllowed).build(),
         }
     }
 
@@ -148,9 +148,9 @@ impl Router {
 
     pub(crate) async fn dispatch(&self, req: CoapRequest) -> CoapResponse {
         let path = req.path();
-        match self.routes.get(&path) {
+        match self.routes.get(path) {
             Some(method_router) => method_router.dispatch(req).await,
-            None => CoapResponse::not_found(),
+            None => CoapResponse::new(ResponseType::NotFound).build(),
         }
     }
 }

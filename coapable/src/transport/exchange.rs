@@ -4,13 +4,13 @@ use coap_lite::Packet;
 use tokio::sync::oneshot;
 use tokio::time::Instant;
 
-use super::reliability::{RetransmitState, NON_LIFETIME};
-use crate::transport::TransportError;
+use super::reliability::{NON_LIFETIME, RetransmitState};
+use crate::{CoapResponse, transport::TransportError};
 
 pub struct Exchange {
     token: Vec<u8>,
     peer: SocketAddr,
-    response_tx: oneshot::Sender<Result<Packet, TransportError>>,
+    response_tx: oneshot::Sender<Result<CoapResponse, TransportError>>,
     /// MID assigned to the outbound CON. None for NON exchanges.
     message_id: Option<u16>,
     /// Retransmission state, present only for CON exchanges.
@@ -24,7 +24,7 @@ impl Exchange {
     pub fn new_con(
         token: Vec<u8>,
         peer: SocketAddr,
-        response_tx: oneshot::Sender<Result<Packet, TransportError>>,
+        response_tx: oneshot::Sender<Result<CoapResponse, TransportError>>,
         message_id: u16,
         packet_bytes: Vec<u8>,
         now: Instant,
@@ -43,7 +43,7 @@ impl Exchange {
     pub fn new_non(
         token: Vec<u8>,
         peer: SocketAddr,
-        response_tx: oneshot::Sender<Result<Packet, TransportError>>,
+        response_tx: oneshot::Sender<Result<CoapResponse, TransportError>>,
         now: Instant,
     ) -> Self {
         Self {
@@ -114,7 +114,7 @@ impl Exchange {
     }
 
     /// Deliver a successful response to the waiting caller. Consumes the exchange.
-    pub fn complete(self, response: Packet) {
+    pub fn complete(self, response: CoapResponse) {
         let _ = self.response_tx.send(Ok(response));
     }
 

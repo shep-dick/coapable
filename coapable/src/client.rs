@@ -1,9 +1,7 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use coap_lite::{
-    CoapOption, ContentFormat, MessageClass, MessageType, Packet, RequestType, ResponseType,
-};
+use coap_lite::{ContentFormat, RequestType};
 
 use crate::CoapRequest;
 use crate::message_types::{CoapRequestBuilder, CoapResponse};
@@ -83,32 +81,32 @@ impl ClientRequestBuilder {
     }
 
     /// Sets the URI path (e.g. "/sensors/temperature").
-    pub fn path(&mut self, path: &str) -> &Self {
-        self.base.path(path);
+    pub fn path(mut self, path: &str) -> Self {
+        self.base = self.base.path(path);
         self
     }
 
     /// Adds a query parameter encoded as "key=value" in Uri-Query.
-    pub fn query(&mut self, key: &str, value: &str) -> &Self {
-        self.base.query(&format!("{key}={value}"));
+    pub fn query(mut self, key: &str, value: &str) -> Self {
+        self.base = self.base.query(&format!("{key}={value}"));
         self
     }
 
     /// Sets the request payload.
-    pub fn payload(&mut self, data: &[u8]) -> &Self {
-        self.base.payload(data);
+    pub fn payload(mut self, data: &[u8]) -> Self {
+        self.base = self.base.payload(data);
         self
     }
 
     /// Sets the Content-Format option.
-    pub fn content_format(&mut self, cf: ContentFormat) -> &Self {
-        self.base.content_format(cf);
+    pub fn content_format(mut self, cf: ContentFormat) -> Self {
+        self.base = self.base.content_format(cf);
         self
     }
 
     /// Sets the Accept option.
-    pub fn accept(&mut self, cf: ContentFormat) -> &Self {
-        self.base.accept(cf);
+    pub fn accept(mut self, cf: ContentFormat) -> Self {
+        self.base = self.base.accept(cf);
         self
     }
 
@@ -116,13 +114,13 @@ impl ClientRequestBuilder {
     ///
     /// Confirmable requests are retransmitted until acknowledged.
     /// Non-confirmable requests are fire-and-forget at the transport layer.
-    pub fn confirmable(&mut self, confirm: bool) -> &Self {
-        self.base.confirmable(confirm);
+    pub fn confirmable(mut self, confirm: bool) -> Self {
+        self.base = self.base.confirmable(confirm);
         self
     }
 
     /// Sets the request timeout (default: 30 seconds).
-    pub fn timeout(&mut self, timeout: Duration) -> &Self {
+    pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
     }
@@ -145,7 +143,7 @@ impl ClientRequestBuilder {
             Err(_) => return Err(ClientError::Timeout),
         };
 
-        Ok(CoapResponse::from_packet(&packet)?)
+        Ok(packet)
     }
 }
 
@@ -153,7 +151,7 @@ impl ClientRequestBuilder {
 mod tests {
     use super::*;
     use crate::transport::{CoapEndpoint, CoapStack};
-    use coap_lite::ResponseType;
+    use coap_lite::{CoapOption, MessageClass, MessageType, Packet, ResponseType};
     use tokio::net::UdpSocket;
 
     #[tokio::test]
@@ -233,7 +231,7 @@ mod tests {
                 .post(addr_b)
                 .path("/data")
                 .content_format(ContentFormat::ApplicationJSON)
-                .payload(b"{\"value\":42}".to_vec())
+                .payload(b"{\"value\":42}")
                 .confirmable(false)
                 .send()
                 .await
