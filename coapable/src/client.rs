@@ -5,7 +5,8 @@ use coap_lite::{
     CoapOption, ContentFormat, MessageClass, MessageType, Packet, RequestType, ResponseType,
 };
 
-use crate::message_types::CoapResponse;
+use crate::CoapRequest;
+use crate::message_types::{CoapRequestBuilder, CoapResponse};
 use crate::transport::ClientInterface;
 
 #[derive(Debug, thiserror::Error)]
@@ -38,84 +39,77 @@ impl CoapClient {
         Self { interface }
     }
 
-    pub fn get(&self, peer: SocketAddr) -> RequestBuilder {
-        RequestBuilder::new(self.interface.clone(), peer, RequestType::Get)
+    pub fn get(&self, peer: SocketAddr) -> ClientRequestBuilder {
+        ClientRequestBuilder::new(self.interface.clone(), peer, RequestType::Get)
     }
 
-    pub fn post(&self, peer: SocketAddr) -> RequestBuilder {
-        RequestBuilder::new(self.interface.clone(), peer, RequestType::Post)
+    pub fn post(&self, peer: SocketAddr) -> ClientRequestBuilder {
+        ClientRequestBuilder::new(self.interface.clone(), peer, RequestType::Post)
     }
 
-    pub fn put(&self, peer: SocketAddr) -> RequestBuilder {
-        RequestBuilder::new(self.interface.clone(), peer, RequestType::Put)
+    pub fn put(&self, peer: SocketAddr) -> ClientRequestBuilder {
+        ClientRequestBuilder::new(self.interface.clone(), peer, RequestType::Put)
     }
 
-    pub fn delete(&self, peer: SocketAddr) -> RequestBuilder {
-        RequestBuilder::new(self.interface.clone(), peer, RequestType::Delete)
+    pub fn delete(&self, peer: SocketAddr) -> ClientRequestBuilder {
+        ClientRequestBuilder::new(self.interface.clone(), peer, RequestType::Delete)
     }
+}
+
+pub struct ClientRequest {
+    pub(crate) interface: ClientInterface,
+    pub(crate) peer: SocketAddr,
+    pub(crate) request: CoapRequest,
+    pub(crate) timeout: Duration,
 }
 
 /// Builds a CoAP request with a fluent API.
 ///
 /// Requests are Confirmable (reliable) by default.
-pub struct RequestBuilder {
+pub struct ClientRequestBuilder {
     interface: ClientInterface,
     peer: SocketAddr,
-    method: RequestType,
-    path: Option<String>,
-    queries: Vec<String>,
-    payload: Option<Vec<u8>>,
-    content_format: Option<ContentFormat>,
-    accept: Option<ContentFormat>,
-    confirmable: bool,
-    token: Option<Vec<u8>>,
+    base: CoapRequestBuilder,
     timeout: Duration,
 }
 
-impl RequestBuilder {
+impl ClientRequestBuilder {
     fn new(interface: ClientInterface, peer: SocketAddr, method: RequestType) -> Self {
         Self {
             interface,
             peer,
-            method,
-            path: None,
-            queries: Vec::new(),
-            payload: None,
-            content_format: None,
-            accept: None,
-            confirmable: true,
-            token: None,
-            timeout: Duration::from_secs(30),
+            base: CoapRequestBuilder::new(method),
+            timeout: Duration::from_secs(5), // @TODO: determine real default timeout
         }
     }
 
     /// Sets the URI path (e.g. "/sensors/temperature").
-    pub fn path(mut self, path: &str) -> Self {
-        self.path = Some(path.to_string());
+    pub fn path(&mut self, path: &str) -> &Self {
+        self.base.path(path);
         self
     }
 
     /// Adds a query parameter encoded as "key=value" in Uri-Query.
-    pub fn query(mut self, key: &str, value: &str) -> Self {
-        self.queries.push(format!("{key}={value}"));
+    pub fn query(&mut self, key: &str, value: &str) -> &Self {
+        self.base.query(&format!("{key}={value}"));
         self
     }
 
     /// Sets the request payload.
-    pub fn payload(mut self, data: impl Into<Vec<u8>>) -> Self {
-        self.payload = Some(data.into());
+    pub fn payload(&mut self, data: &[u8]) -> &Self {
+        self.base.payload(data);
         self
     }
 
     /// Sets the Content-Format option.
-    pub fn content_format(mut self, cf: ContentFormat) -> Self {
-        self.content_format = Some(cf);
+    pub fn content_format(&mut self, cf: ContentFormat) -> &Self {
+        self.base.content_format(cf);
         self
     }
 
     /// Sets the Accept option.
-    pub fn accept(mut self, cf: ContentFormat) -> Self {
-        self.accept = Some(cf);
+    pub fn accept(&mut self, cf: ContentFormat) -> &Self {
+        self.base.accept(cf);
         self
     }
 
@@ -123,67 +117,32 @@ impl RequestBuilder {
     ///
     /// Confirmable requests are retransmitted until acknowledged.
     /// Non-confirmable requests are fire-and-forget at the transport layer.
-    pub fn confirmable(mut self, confirm: bool) -> Self {
-        self.confirmable = confirm;
-        self
-    }
-
-    /// Overrides the auto-generated token with a custom one.
-    pub fn token(mut self, token: Vec<u8>) -> Self {
-        self.token = Some(token);
+    pub fn confirmable(&mut self, confirm: bool) -> &Self {
+        self.base.confirmable(confirm);
         self
     }
 
     /// Sets the request timeout (default: 30 seconds).
-    pub fn timeout(mut self, timeout: Duration) -> Self {
+    pub fn timeout(&mut self, timeout: Duration) -> &Self {
         self.timeout = timeout;
         self
     }
 
     /// Builds the packet, sends the request, and awaits the response.
     pub async fn send(self) -> Result<CoapResponse> {
-        let mut packet = Packet::new();
+        let request = self.base.build();
 
-        packet.header.code = MessageClass::Request(self.method);
-        packet.header.set_type(if self.confirmable {
-            MessageType::Confirmable
-        } else {
-            MessageType::NonConfirmable
-        });
+        let client_request = ClientRequest {
+            interface: self.interface,
+            peer: self.peer,
+            request,
+            timeout: self.timeout,
+        };
 
-        // Token: if user provided one, set it; otherwise leave empty
-        // and the transport layer will allocate one per-peer.
-        if let Some(token) = self.token {
-            packet.set_token(token);
-        }
-
-        if let Some(ref path) = self.path {
-            for segment in path.split('/').filter(|s| !s.is_empty()) {
-                packet.add_option(CoapOption::UriPath, segment.as_bytes().to_vec());
-            }
-        }
-
-        for q in &self.queries {
-            packet.add_option(CoapOption::UriQuery, q.as_bytes().to_vec());
-        }
-
-        if let Some(cf) = self.content_format {
-            packet.set_content_format(cf);
-        }
-
-        if let Some(cf) = self.accept {
-            let value = usize::from(cf) as u16;
-            packet.add_option_as(
-                CoapOption::Accept,
-                coap_lite::option_value::OptionValueU16(value),
-            );
-        }
-
-        if let Some(payload) = self.payload {
-            packet.payload = payload;
-        }
-
-        let response_rx = self.interface.send_request(packet, self.peer).await?;
+        let response_rx = self
+            .interface
+            .send_request(client_request, self.peer)
+            .await?;
         let packet = match tokio::time::timeout(self.timeout, response_rx).await {
             Ok(Ok(Ok(packet))) => packet,
             Ok(Ok(Err(transport_err))) => return Err(transport_err.into()),

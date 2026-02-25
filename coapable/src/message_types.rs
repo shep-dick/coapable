@@ -1,9 +1,6 @@
-use std::{net::SocketAddr, str::FromStr};
+use std::time::Duration;
 
-use bytes::Bytes;
-use coap_lite::{
-    CoapOption, ContentFormat, MessageClass, MessageType, Packet, RequestType, ResponseType,
-};
+use coap_lite::{ContentFormat, MessageClass, Packet, RequestType, ResponseType};
 
 #[derive(Debug, thiserror::Error)]
 pub enum MessageError {
@@ -57,12 +54,10 @@ pub struct CoapResponse {
 }
 
 impl CoapResponse {
-    // Constructor
     pub fn new(response_type: ResponseType, token: Vec<u8>) -> CoapResponseBuilder {
         CoapResponseBuilder::new(response_type, token)
     }
 
-    // From raw packet constructor
     pub fn from_packet(packet: &Packet) -> Result<Self, MessageError> {
         let response_type = match packet.header.code {
             MessageClass::Response(code) => Ok(code),
@@ -83,22 +78,18 @@ impl CoapResponse {
         })
     }
 
-    /// Returns the response status code.
     pub fn status(&self) -> ResponseType {
         self.response_type
     }
 
-    /// Returns the response payload as a slice.
     pub fn payload(&self) -> &[u8] {
         &self.payload
     }
 
-    /// Returns the payload as a UTF-8 string, if valid.
     pub fn payload_string(&self) -> Option<&str> {
         std::str::from_utf8(&self.payload).ok()
     }
 
-    /// Returns the Content-Format of the response, if present.
     pub fn content_format(&self) -> Option<ContentFormat> {
         self.content_format
     }
@@ -110,6 +101,8 @@ pub struct CoapRequestBuilder {
     queries: Vec<String>,
     content_format: Option<ContentFormat>,
     payload: Vec<u8>,
+    accept: Option<ContentFormat>,
+    confirmable: bool,
 }
 
 impl CoapRequestBuilder {
@@ -120,6 +113,8 @@ impl CoapRequestBuilder {
             queries: Vec::new(),
             content_format: None,
             payload: Vec::new(),
+            accept: None,
+            confirmable: true,
         }
     }
 
@@ -143,6 +138,16 @@ impl CoapRequestBuilder {
         self
     }
 
+    pub fn accept(&mut self, content_format: ContentFormat) -> &Self {
+        self.accept = Some(content_format);
+        self
+    }
+
+    pub fn confirmable(&mut self, confirmable: bool) -> &Self {
+        self.confirmable = confirmable;
+        self
+    }
+
     pub fn build(self) -> CoapRequest {
         CoapRequest {
             method: self.method,
@@ -150,6 +155,8 @@ impl CoapRequestBuilder {
             queries: self.queries,
             content_format: self.content_format,
             payload: self.payload,
+            accept: self.accept,
+            confirmable: self.confirmable,
         }
     }
 }
@@ -160,6 +167,8 @@ pub struct CoapRequest {
     queries: Vec<String>,
     content_format: Option<ContentFormat>,
     payload: Vec<u8>,
+    accept: Option<ContentFormat>,
+    confirmable: bool,
 }
 
 impl CoapRequest {
@@ -192,5 +201,13 @@ impl CoapRequest {
 
     pub fn content_format(&self) -> Option<ContentFormat> {
         self.content_format
+    }
+
+    pub fn accept(&self) -> Option<ContentFormat> {
+        self.accept
+    }
+
+    pub fn confirmable(&self) -> bool {
+        self.confirmable
     }
 }
