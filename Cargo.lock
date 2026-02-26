@@ -273,6 +273,8 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "coap-lite",
+ "coap-message 0.3.6",
+ "coap-message-implementations",
  "dashmap",
  "liboscore",
  "rand",
