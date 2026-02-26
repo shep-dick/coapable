@@ -2,17 +2,22 @@ use std::net::SocketAddr;
 
 use coap_lite::Packet;
 use dashmap::DashMap;
-use liboscore::PrimitiveContext;
+use liboscore::{PrimitiveContext, raw::oscore_requestid_t};
 use std::sync::Arc;
 
 use super::OscoreError;
 
 pub struct OscoreContext {
     ctx: PrimitiveContext,
+    // Request ID dashmaps bind message token to request ID
+    // Outbound request IDs are for client requests and responses
+    // Inbound request IDs are for server requests and responses
+    outbound_request_ids: DashMap<Vec<u8>, oscore_requestid_t>,
+    inbound_request_ids: DashMap<Vec<u8>, oscore_requestid_t>,
 }
 
-// @TODO: I should eventually write my own OSCORE en/decryption business logic instead of using
-// liboscore. For now, this will do.
+// @TODO: I should eventually write my own OSCORE crypto + parsing business logic instead of using
+// liboscore but for now, this will do
 
 // SAFETY: PrimitiveContext is !Send only because it contains self-referential raw pointers
 // (context.data -> primitive, primitive.immutables -> immutables). These pointers are
@@ -21,20 +26,35 @@ pub struct OscoreContext {
 unsafe impl Send for OscoreContext {}
 unsafe impl Sync for OscoreContext {}
 
+// Actually I don't think we need to use a DashMap here
+// We can just have this live only in the transport layer stack task
+// In a repository in an application where we want to persist contexts we just store the immutables
+// And we just re-initialize the contexts from the saved immutables on reboot
+
 impl OscoreContext {
-    fn protect_request(&mut self, pkt: &Packet) -> Result<Packet, OscoreError> {
+    pub fn protect_request(&mut self, pkt: &Packet) -> Result<Packet, OscoreError> {
         todo!()
     }
 
-    fn unprotect_request(&mut self, pkt: &Packet) -> Result<Packet, OscoreError> {
+    pub fn unprotect_request(&mut self, pkt: &Packet) -> Result<Packet, OscoreError> {
         todo!()
     }
 
-    fn protect_response(&mut self, pkt: &Packet) -> Result<Packet, OscoreError> {
+    pub fn protect_response(&mut self, pkt: &Packet) -> Result<Packet, OscoreError> {
+        let request_id = self
+            .inbound_request_ids
+            .get(pkt.get_token())
+            .ok_or(OscoreError::RequestNotFound)?
+            .value();
         todo!()
     }
 
-    fn unprotect_response(&mut self, pkt: &Packet) -> Result<Packet, OscoreError> {
+    pub fn unprotect_response(&mut self, pkt: &Packet) -> Result<Packet, OscoreError> {
+        let request_id = self
+            .outbound_request_ids
+            .get(pkt.get_token())
+            .ok_or(OscoreError::RequestNotFound)?
+            .value();
         todo!()
     }
 }
